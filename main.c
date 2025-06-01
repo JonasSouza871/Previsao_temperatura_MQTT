@@ -30,7 +30,7 @@
 #define WIFI_PASSWORD "Senha_wifi"      // Substitua pela senha da sua rede Wi-Fi
 #define MQTT_SERVER "ip_host"     // Substitua pelo endereço do host - broker MQTT: Ex: 192.168.1.107
 #define MQTT_USERNAME "Usario_mqtt"           // Substitua pelo nome da host MQTT - Username
-#define MQTT_PASSWORD "Senha_mqtt"        // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
+#define MQTT_PASSWORD "Senha_mqtt_"        // Substitua pelo Password da host MQTT - credencial de acesso - caso exista
 
 // Definição da escala de temperatura
 #ifndef TEMPERATURE_UNITS
