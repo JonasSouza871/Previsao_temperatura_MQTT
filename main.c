@@ -1,127 +1,125 @@
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
-#include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
 #include "pico/time.h"
 #include "ssd1306.h"
+#include "string.h"
 #include "ds18b20.h"
-
-// FreeRTOS includes
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
 #include "queue.h"
 
-//==============================================================================
-// Definições de Pinos
-//==============================================================================
-#define OLED_SDA_PIN    14
-#define OLED_SCL_PIN    15
-#define ADC_JOYSTICK_PIN    26 // ADC0
-#define BUTTON_JOYSTICK_PIN 5
-#define DS18B20_PIN     16
+// Definições de pinos
+#define I2C_SDA_PIN 14
+#define I2C_SCL_PIN 15
+#define ADC_PIN 26
+#define BOTAO_PIN 5
+#define DS18B20_PIN 16
 
-//==============================================================================
 // Variáveis Globais e Handles do FreeRTOS
-//==============================================================================
-
 static ssd1306_t display;
-
-// Variáveis de configuração
-static int temperature_urgencia = 30;
-static int temperature_prevista = 25;
-static volatile float temperature_atual = 0.0; // volatile pois é modificada por uma task e lida por outra
-static int current_screen = 0; // 0=urgencia, 1=prevista, 2=terceira_tela
+static int temperatura_urgencia = 30;
+static int temperatura_prevista = 25;
+static float temperatura_atual = 0.0;
+static int tela_atual = 0; // 0=urgencia, 1=prevista, 2=terceira_tela
 
 // Handles do FreeRTOS
 static SemaphoreHandle_t xDisplayMutex;
-static SemaphoreHandle_t xTempMutex; // Para proteger temperature_atual
-static TaskHandle_t xDisplayTaskHandle; // Usado para notificar a task de display
+static SemaphoreHandle_t xTemperaturaMutex;
+static TaskHandle_t xTemperaturaTaskHandle;
+static TaskHandle_t xDisplayTaskHandle;
+static TaskHandle_t xEntradaTaskHandle;
 
-//==============================================================================
-// Definições de Tasks
-//==============================================================================
+// Queue para comandos de mudança de tela
+static QueueHandle_t xScreenQueue;
 
 // Task para leitura de temperatura
-static void vTemperatureTask(void *pvParameters) {
-    (void)pvParameters; // Evita warning de parâmetro não utilizado
-    float temp_reading = 0.0;
-    float temp_filtered = 0.0;
-    bool first_reading = true;
+static void vTemperaturaTask(void *pvParameters) {
+    float leitura_temperatura = 0.0;
+    float temperatura_filtrada = 0.0;
+    bool primeira_leitura = true;
 
     while (1) {
-        temp_reading = ds18b20_get_temperature();
+        // Lê temperatura do sensor
+        leitura_temperatura = ds18b20_get_temperature();
 
         // Filtro simples para evitar variações bruscas
-        if (first_reading) {
-            temp_filtered = temp_reading;
-            first_reading = false;
+        if (primeira_leitura) {
+            temperatura_filtrada = leitura_temperatura;
+            primeira_leitura = false;
         } else {
-            // Aplica filtro passa-baixa simples (coeficientes ajustáveis)
-            temp_filtered = (temp_filtered * 0.8f) + (temp_reading * 0.2f);
+            // Aplica filtro passa-baixa simples
+            temperatura_filtrada = (temperatura_filtrada * 0.8) + (leitura_temperatura * 0.2);
         }
 
         // Validação da leitura (evita valores absurdos)
-        if (temp_reading > -20.0f && temp_reading < 80.0f) {
-            if (xSemaphoreTake(xTempMutex, portMAX_DELAY) == pdTRUE) {
-                temperature_atual = temp_filtered;
-                xSemaphoreGive(xTempMutex);
+        if (leitura_temperatura > -20.0 && leitura_temperatura < 80.0) {
+            // Protege a variável global com mutex
+            if (xSemaphoreTake(xTemperaturaMutex, portMAX_DELAY) == pdTRUE) {
+                temperatura_atual = temperatura_filtrada;
+                xSemaphoreGive(xTemperaturaMutex);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(2000)); // Lê a cada 2 segundos
+
+        // Aguarda 2 segundos antes da próxima leitura
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
 // Task para controle de entrada do usuário
-static void vInputTask(void *pvParameters) {
-    (void)pvParameters;
-    uint16_t adc_value;
-    bool button_pressed = false;
-    TickType_t last_joystick_change = 0;
+static void vEntradaTask(void *pvParameters) {
+    uint16_t valor_adc;
+    bool botao_pressionado = false;
+    TickType_t ultima_mudanca_joystick = 0;
 
     while (1) {
-        adc_value = adc_read();
-        TickType_t current_tick = xTaskGetTickCount();
+        // Lê o ADC (joystick)
+        valor_adc = adc_read();
+        TickType_t tick_atual = xTaskGetTickCount();
 
-        // Debounce para o joystick (300ms)
-        if ((current_tick - last_joystick_change) > pdMS_TO_TICKS(300)) {
-            bool changed = false;
+        // Verifica se passou tempo suficiente desde a última mudança (300ms)
+        if ((tick_atual - ultima_mudanca_joystick) > pdMS_TO_TICKS(300)) {
+            bool mudou = false;
 
-            if (current_screen < 2) { // Só permite controle nas duas primeiras telas
-                if (adc_value > 3000) { // Joystick para cima
-                    if (current_screen == 0) {
-                        temperature_urgencia++;
-                    } else if (current_screen == 1) {
-                        temperature_prevista++;
+            if (tela_atual < 2) { // Só permite controle nas duas primeiras telas
+                if (valor_adc > 3000) {
+                    if (tela_atual == 0) {
+                        temperatura_urgencia++;
+                    } else if (tela_atual == 1) {
+                        temperatura_prevista++;
                     }
-                    changed = true;
-                } else if (adc_value < 1000) { // Joystick para baixo
-                    if (current_screen == 0) {
-                        temperature_urgencia--;
-                    } else if (current_screen == 1) {
-                        temperature_prevista--;
+                    mudou = true;
+                } else if (valor_adc < 1000) {
+                    if (tela_atual == 0) {
+                        temperatura_urgencia--;
+                    } else if (tela_atual == 1) {
+                        temperatura_prevista--;
                     }
-                    changed = true;
+                    mudou = true;
                 }
-                if (changed) {
-                    last_joystick_change = current_tick;
+
+                if (mudou) {
+                    ultima_mudanca_joystick = tick_atual;
                 }
             }
         }
 
-        // Botão de mudança de tela e debounce
-        if (!gpio_get(BUTTON_JOYSTICK_PIN) && !button_pressed) {
-            button_pressed = true;
-            current_screen++;
-            if (current_screen > 2) {
-                current_screen = 0; // Volta para a primeira tela
-            }
-            xTaskNotify(xDisplayTaskHandle, 1, eSetBits); // Força atualização do display
-        } else if (gpio_get(BUTTON_JOYSTICK_PIN)) {
-            button_pressed = false;
+        // Verifica botão de mudança de tela
+        if (!gpio_get(BOTAO_PIN) && !botao_pressionado) {
+            botao_pressionado = true;
+            tela_atual++;
+            if (tela_atual > 2) tela_atual = 2;
+
+            // Força atualização do display
+            xTaskNotify(xDisplayTaskHandle, 1, eSetBits);
+
+        } else if (gpio_get(BOTAO_PIN)) {
+            botao_pressionado = false;
         }
 
         vTaskDelay(pdMS_TO_TICKS(50)); // Verifica a cada 50ms
@@ -130,57 +128,72 @@ static void vInputTask(void *pvParameters) {
 
 // Task para atualização do display
 static void vDisplayTask(void *pvParameters) {
-    (void)pvParameters;
     uint32_t ulNotificationValue;
-    char line_str[30];
 
-    for (;;) {
-        // Aguarda notificação ou timeout de 100ms para atualizar
+    while (1) {
+        // Aguarda notificação ou timeout de 100ms
         xTaskNotifyWait(0x00, ULONG_MAX, &ulNotificationValue, pdMS_TO_TICKS(100));
 
+        // Protege o display com mutex
         if (xSemaphoreTake(xDisplayMutex, portMAX_DELAY) == pdTRUE) {
             ssd1306_fill(&display, false);
 
-            if (current_screen == 0) {
+            if (tela_atual == 0) {
+                // Primeira tela - Temperatura Urgência
                 ssd1306_draw_string(&display, "Temperatura", 20, 0, false);
                 ssd1306_draw_string(&display, "Urgencia", 32, 16, false);
 
-                snprintf(line_str, sizeof(line_str), "%d C", temperature_urgencia);
-                int text_width = strlen(line_str) * 6;
-                int center_x = (128 - text_width) / 2;
-                ssd1306_draw_string(&display, line_str, center_x, 40, false);
+                char temp_str[10];
+                snprintf(temp_str, sizeof(temp_str), "%d C", temperatura_urgencia);
 
-            } else if (current_screen == 1) {
+                int largura_texto = strlen(temp_str) * 6;
+                int centro_x = (128 - largura_texto) / 2;
+
+                ssd1306_draw_string(&display, temp_str, centro_x, 40, false);
+
+            } else if (tela_atual == 1) {
+                // Segunda tela - Temperatura Prevista
                 ssd1306_draw_string(&display, "Temperatura", 20, 0, false);
                 ssd1306_draw_string(&display, "Prevista", 32, 16, false);
-                ssd1306_draw_string(&display, "Urgencia", 32, 32, false); // Mantido conforme seu código original
+                ssd1306_draw_string(&display, "Urgencia", 32, 32, false);
 
-                snprintf(line_str, sizeof(line_str), "%d C", temperature_prevista);
-                int text_width = strlen(line_str) * 6;
-                int center_x = (128 - text_width) / 2;
-                ssd1306_draw_string(&display, line_str, center_x, 48, false);
+                char temp_str[10];
+                snprintf(temp_str, sizeof(temp_str), "%d C", temperatura_prevista);
 
-            } else if (current_screen == 2) {
+                int largura_texto = strlen(temp_str) * 6;
+                int centro_x = (128 - largura_texto) / 2;
+
+                ssd1306_draw_string(&display, temp_str, centro_x, 48, false);
+
+            } else if (tela_atual == 2) {
+                // Terceira tela - Resumo de Informações
+                char linha_str[25];
                 float temp_atual_local;
 
                 // Lê temperatura atual de forma protegida
-                if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    temp_atual_local = temperature_atual;
-                    xSemaphoreGive(xTempMutex);
+                if (xSemaphoreTake(xTemperaturaMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    temp_atual_local = temperatura_atual;
+                    xSemaphoreGive(xTemperaturaMutex);
                 } else {
-                    temp_atual_local = 0.0f; // Valor padrão se não conseguir ler
+                    temp_atual_local = 0.0; // Valor padrão se não conseguir ler
                 }
 
-                snprintf(line_str, sizeof(line_str), "Temp urg: %d C", temperature_urgencia);
-                ssd1306_draw_string(&display, line_str, 0, 0, false);
+                // Temperatura de urgência
+                snprintf(linha_str, sizeof(linha_str), "Temp urg: %d C", temperatura_urgencia);
+                ssd1306_draw_string(&display, linha_str, 0, 0, false);
 
-                snprintf(line_str, sizeof(line_str), "Temp prev urg:%dC", temperature_prevista);
-                ssd1306_draw_string(&display, line_str, 0, 14, false);
+                // Temperatura prevista de urgência
+                snprintf(linha_str, sizeof(linha_str), "Temp prev urg:%dC", temperatura_prevista);
+                ssd1306_draw_string(&display, linha_str, 0, 14, false);
 
-                snprintf(line_str, sizeof(line_str), "Temp atual:%.1fC", (double)temp_atual_local); // Cast para double para snprintf com float
-                ssd1306_draw_string(&display, line_str, 0, 28, false);
+                // Temperatura atual
+                snprintf(linha_str, sizeof(linha_str), "Temp atual:%.1fC", temp_atual_local);
+                ssd1306_draw_string(&display, linha_str, 0, 28, false);
 
+                // Cor (placeholder)
                 ssd1306_draw_string(&display, "Cor:valor", 0, 42, false);
+
+                // Situação (placeholder)
                 ssd1306_draw_string(&display, "Situacao:valor", 0, 56, false);
             }
 
@@ -190,63 +203,54 @@ static void vDisplayTask(void *pvParameters) {
     }
 }
 
-//==============================================================================
 // Função Principal
-//==============================================================================
-
 int main(void) {
     stdio_init_all();
 
-    // Configuração I2C para o OLED
+    // Configuração I2C
     i2c_init(i2c1, 100 * 1000);
-    gpio_set_function(OLED_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(OLED_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(OLED_SDA_PIN);
-    gpio_pull_up(OLED_SCL_PIN);
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_PIN);
+    gpio_pull_up(I2C_SCL_PIN);
 
-    // Inicialização do display OLED
+    // Inicialização do display
     ssd1306_init(&display, 128, 64, false, 0x3C, i2c1);
     ssd1306_config(&display);
 
-    // Configuração do ADC para o joystick
+    // Configuração ADC
     adc_init();
-    adc_gpio_init(ADC_JOYSTICK_PIN);
-    adc_select_input(0); // Assumindo ADC0 está no pino ADC_JOYSTICK_PIN
+    adc_gpio_init(ADC_PIN);
+    adc_select_input(0);
 
-    // Configuração do pino do botão do joystick
-    gpio_init(BUTTON_JOYSTICK_PIN);
-    gpio_set_dir(BUTTON_JOYSTICK_PIN, GPIO_IN);
-    gpio_pull_up(BUTTON_JOYSTICK_PIN);
+    // Configuração do botão
+    gpio_init(BOTAO_PIN);
+    gpio_set_dir(BOTAO_PIN, GPIO_IN);
+    gpio_pull_up(BOTAO_PIN);
 
     // Inicialização do sensor DS18B20
     ds18b20_init(DS18B20_PIN);
 
     // Criação dos mutexes
     xDisplayMutex = xSemaphoreCreateMutex();
-    xTempMutex = xSemaphoreCreateMutex();
+    xTemperaturaMutex = xSemaphoreCreateMutex();
 
-    if (xDisplayMutex == NULL || xTempMutex == NULL) {
-        printf("Erro: Falha ao criar mutexes. Verifique a memória heap do FreeRTOS.\n");
-        while(1) {
-            tight_loop_contents(); // Trava aqui em caso de erro fatal
-        }
+    if (xDisplayMutex == NULL || xTemperaturaMutex == NULL) {
+        printf("Erro ao criar mutexes\n");
+        while(1);
     }
 
     // Criação das tasks
-    // Prioridades: Quanto maior o número, maior a prioridade.
-    // Display e Temperatura com prioridade igual para um bom equilíbrio.
-    // Input com prioridade um pouco maior para garantir responsividade rápida.
-    xTaskCreate(vTemperatureTask, "TempTask", configMINIMAL_STACK_SIZE * 2, NULL, 2, NULL);
-    xTaskCreate(vInputTask, "InputTask", configMINIMAL_STACK_SIZE, NULL, 3, NULL);
-    xTaskCreate(vDisplayTask, "DisplayTask", configMINIMAL_STACK_SIZE * 2, NULL, 2, &xDisplayTaskHandle);
+    xTaskCreate(vTemperaturaTask, "TempTask", 1024, NULL, 2, &xTemperaturaTaskHandle);
+    xTaskCreate(vEntradaTask, "InputTask", 512, NULL, 1, &xEntradaTaskHandle);
+    xTaskCreate(vDisplayTask, "DisplayTask", 1024, NULL, 1, &xDisplayTaskHandle);
 
     // Inicia o scheduler do FreeRTOS
     vTaskStartScheduler();
 
-    // Este ponto nunca deve ser alcançado se o scheduler iniciar corretamente
-    printf("Erro: Scheduler FreeRTOS parou inesperadamente.\n");
+    // Nunca deve chegar aqui
     while (1) {
-        tight_loop_contents();
+        printf("Erro: Scheduler parou\n");
     }
 
     return 0;
