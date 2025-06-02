@@ -154,17 +154,26 @@ static void update_display(void) {
         ssd1306_draw_string(&display, temp_str, center_x, 48, false);
 
     } else if (current_screen == 2) {
-        // Terceira tela - Temperatura Atual do Sensor
-        ssd1306_draw_string(&display, "Temperatura", 20, 0, false);
-        ssd1306_draw_string(&display, "Atual", 42, 20, false);
+        // Terceira tela - Resumo de Informações
+        char line_str[25];
 
-        char temp_str[15];
-        snprintf(temp_str, sizeof(temp_str), "%.1f C", temperature_atual);
+        // Temperatura de urgência
+        snprintf(line_str, sizeof(line_str), "Temp urg: %d C", temperature_urgencia);
+        ssd1306_draw_string(&display, line_str, 0, 0, false);
 
-        int text_width = strlen(temp_str) * 6;
-        int center_x = (128 - text_width) / 2;
+        // Temperatura prevista de urgência  
+        snprintf(line_str, sizeof(line_str), "Temp prev urg:%dC", temperature_prevista);
+        ssd1306_draw_string(&display, line_str, 0, 14, false);
 
-        ssd1306_draw_string(&display, temp_str, center_x, 40, false);
+        // Temperatura atual
+        snprintf(line_str, sizeof(line_str), "Temp atual:%.1fC", temperature_atual);
+        ssd1306_draw_string(&display, line_str, 0, 28, false);
+
+        // Cor (placeholder)
+        ssd1306_draw_string(&display, "Cor:valor", 0, 42, false);
+
+        // Situação (placeholder)
+        ssd1306_draw_string(&display, "Situacao:valor", 0, 56, false);
     }
 
     ssd1306_send_data(&display);
