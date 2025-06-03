@@ -339,6 +339,7 @@ static void renderizar_tela_resumo(void)
     float temp_atual_local, temp_prevista_local;
     float diferenca = 0.0;
     const char *situacao = "Desconhecida";
+    const char *cor = "Desconhecida";
 
     // Obtém os valores de temperatura com segurança
     if (xSemaphoreTake(mutex_estado_sistema, pdMS_TO_TICKS(10)) == pdTRUE)
@@ -389,23 +390,24 @@ static void renderizar_tela_resumo(void)
     snprintf(linha_str, sizeof(linha_str), "Situacao:%s", situacao);
     ssd1306_draw_string(&display, linha_str, 0, 42, false);
 
-    ssd1306_draw_string(&display, "Cor:valor", 0, 56, false);
-
-    // Controle do LED RGB com base na situação
+    // Controle do LED RGB com base na situação e determina a cor
     if (strcmp(situacao, "Normal") == 0)
     {
         gpio_put(PINO_LED_VERDE, 1);
         gpio_put(PINO_LED_VERMELHO, 0);
+        cor = "Verde";
     }
     else if (strcmp(situacao, "Atencao") == 0)
     {
         gpio_put(PINO_LED_VERDE, 1);
         gpio_put(PINO_LED_VERMELHO, 1);
+        cor = "Amarelo";
     }
     else if (strcmp(situacao, "Alerta") == 0)
     {
         gpio_put(PINO_LED_VERDE, 0);
         gpio_put(PINO_LED_VERMELHO, 1);
+        cor = "Vermelho";
     }
     else if (strcmp(situacao, "Grave") == 0)
     {
@@ -420,7 +422,17 @@ static void renderizar_tela_resumo(void)
             gpio_put(PINO_LED_VERDE, 0); // Garante que o LED verde está desligado
             ultimo_piscar = tick_atual;
         }
+        cor = "Vermelho";
     }
+    else
+    {
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, 0);
+        cor = "Desligado";
+    }
+
+    snprintf(linha_str, sizeof(linha_str), "Cor:%s", cor);
+    ssd1306_draw_string(&display, linha_str, 0, 56, false);
 }
 
 static void tarefa_display(void *pvParameters)
