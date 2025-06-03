@@ -5,6 +5,7 @@
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
+#include "hardware/pwm.h"
 #include "pico/time.h"
 #include "ssd1306.h"
 #include "string.h"
@@ -28,6 +29,7 @@
 #define PINO_DS18B20 16 // Pino do sensor de temperatura DS18B20
 #define PINO_LED_VERDE 11 // Pino do LED verde
 #define PINO_LED_VERMELHO 13 // Pino do LED vermelho
+#define PINO_BUZZER 10 // Pino do buzzer
 
 // Configurações do sistema de previsão
 #define TAMANHO_HISTORICO_TEMP 30 // Armazena as últimas 30 leituras (5 minutos de histórico)
@@ -38,7 +40,7 @@
 #define DEBOUNCE_JOYSTICK_MS 300 // Tempo de debounce para o joystick (ms)
 #define DEBOUNCE_BOTAO_MS 50 // Tempo de debounce para os botões (ms)
 #define TIMEOUT_ATUALIZACAO_DISPLAY_MS 100 // Timeout para atualização do display (ms)
-#define PISCAR_INTERVALO_MS 500 // Intervalo para piscar LEDs/matriz no estado "Grave"
+#define PISCAR_INTERVALO_MS 500 // Intervalo para piscar LEDs/matriz e beeps
 
 // Estruturas para filas
 typedef struct
@@ -123,9 +125,16 @@ static QueueHandle_t fila_dados_temperatura; // Fila para dados de temperatura
 static QueueHandle_t fila_resultados_previsao; // Fila para resultados de previsão
 static QueueHandle_t fila_comandos_usuario; // Fila para comandos do usuário
 
-// Variáveis para controle de piscar
+// Variáveis para controle de piscar e beeps
 static TickType_t ultimo_piscar = 0;
 static bool visivel = true;
+
+static uint slice_buzzer;
+static uint channel_buzzer;
+
+// Aciona / desliga o PWM do buzzer
+static inline void buzzer_on(void)  { pwm_set_enabled(slice_buzzer, true); }
+static inline void buzzer_off(void) { pwm_set_enabled(slice_buzzer, false); }
 
 // ================================================================================================
 // FUNÇÕES AUXILIARES - GERENCIAMENTO DE ESTADO
@@ -153,7 +162,7 @@ static void ler_estado_sistema(EstadoSistemaLeitura_t *leitura)
     }
 }
 
-// Determina a situação com base na tabela
+// Determina a situcao com base na tabela
 static const char *determinar_situacao(float temp_atual, float temp_prevista, int temp_urgencia)
 {
     float diferenca = temp_urgencia - temp_prevista;
@@ -167,7 +176,7 @@ static const char *determinar_situacao(float temp_atual, float temp_prevista, in
     }
     else if (diferenca >= 0.0 && diferenca <= 5.0)
     {
-        return "Atencao";
+        return "atencao";
     }
     else if (diferenca < 0.0)
     {
@@ -176,59 +185,91 @@ static const char *determinar_situacao(float temp_atual, float temp_prevista, in
     return "Desconhecida";
 }
 
-// Atualiza LEDs e matriz de LED com base na situação
+// Toca um beep com duração e frequência específicas
+static void tocar_beep(int duracao_ms, int pausas_restantes, int frequencia_hz)
+{
+    printf("Tentando tocar beep (duracao: %d ms, pausas: %d, freq: %d Hz)\n", duracao_ms, pausas_restantes, frequencia_hz);
+    uint32_t wrap = (1000000 / frequencia_hz) - 1; // Calcula wrap com base na frequência
+    pwm_set_wrap(slice_buzzer, wrap);
+    pwm_set_chan_level(slice_buzzer, channel_buzzer, wrap / 2); // 50% duty cycle
+    buzzer_on();
+    vTaskDelay(pdMS_TO_TICKS(duracao_ms));
+    buzzer_off();
+
+    if (pausas_restantes > 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(100)); // Pausa de 100 ms entre beeps
+        tocar_beep(duracao_ms, pausas_restantes - 1, frequencia_hz);
+    }
+}
+
+// Atualiza LEDs, matriz de LED e buzzer com base na situcao
 static void atualizar_indicadores_visuais(const char *situacao, bool config_concluida)
 {
     const char *cor = "Desconhecida";
 
     if (!config_concluida)
     {
-        // Configuração não concluída: desliga LEDs e matriz
         gpio_put(PINO_LED_VERDE, 0);
         gpio_put(PINO_LED_VERMELHO, 0);
         matriz_clear();
+        buzzer_off();
         return;
     }
 
-    // Configuração concluída: atualiza LEDs e matriz
+    TickType_t tick_atual = xTaskGetTickCount();
+    if ((tick_atual - ultimo_piscar) > pdMS_TO_TICKS(PISCAR_INTERVALO_MS))
+    {
+        visivel = !visivel;
+        ultimo_piscar = tick_atual;
+    }
+
     if (strcmp(situacao, "Normal") == 0)
     {
         gpio_put(PINO_LED_VERDE, 1);
         gpio_put(PINO_LED_VERMELHO, 0);
-        matriz_draw_pattern(PAD_OK, COR_VERDE); // Padrão "coração"
+        matriz_draw_pattern(PAD_OK, COR_VERDE);
+        buzzer_off();
         cor = "Verde";
     }
-    else if (strcmp(situacao, "Atencao") == 0)
+    else if (strcmp(situacao, "atencao") == 0)
     {
         gpio_put(PINO_LED_VERDE, 1);
         gpio_put(PINO_LED_VERMELHO, 1);
-        matriz_draw_pattern(PAD_EXC, COR_AMARELO); // Padrão "!"
+        if (visivel)
+        {
+            matriz_draw_pattern(PAD_EXC, COR_AMARELO);
+            tocar_beep(150, 0, 1500); // 1 beep longo a 1500 Hz
+        }
+        else
+        {
+            matriz_clear();
+        }
         cor = "Amarelo";
     }
     else if (strcmp(situacao, "Alerta") == 0)
     {
         gpio_put(PINO_LED_VERDE, 0);
         gpio_put(PINO_LED_VERMELHO, 1);
-        matriz_draw_pattern(PAD_X, COR_VERMELHO); // Padrão "X"
+        if (visivel)
+        {
+            matriz_draw_pattern(PAD_X, COR_VERMELHO);
+            tocar_beep(100, 1, 2000); // 2 beeps a 2000 Hz
+        }
+        else
+        {
+            matriz_clear();
+        }
         cor = "Vermelho";
     }
     else if (strcmp(situacao, "Grave") == 0)
     {
-        TickType_t tick_atual = xTaskGetTickCount();
-        if ((tick_atual - ultimo_piscar) > pdMS_TO_TICKS(PISCAR_INTERVALO_MS))
-        {
-            visivel = !visivel;
-            ultimo_piscar = tick_atual;
-        }
-
-        // Pisca LED vermelho
         gpio_put(PINO_LED_VERMELHO, visivel ? 1 : 0);
         gpio_put(PINO_LED_VERDE, 0);
-
-        // Pisca matriz
         if (visivel)
         {
-            matriz_draw_pattern(PAD_X, COR_VERMELHO); // Padrão "X"
+            matriz_draw_pattern(PAD_X, COR_VERMELHO);
+            tocar_beep(80, 2, 2500); // 3 beeps rápidos a 2500 Hz
         }
         else
         {
@@ -241,6 +282,7 @@ static void atualizar_indicadores_visuais(const char *situacao, bool config_conc
         gpio_put(PINO_LED_VERDE, 0);
         gpio_put(PINO_LED_VERMELHO, 0);
         matriz_clear();
+        buzzer_off();
         cor = "Desligado";
     }
 }
@@ -425,6 +467,7 @@ static void tarefa_entrada(void *pvParameters)
                 comando_usuario.tipo = COMANDO_PROXIMA_TELA;
                 comando_usuario.valor = 0;
                 xQueueSend(fila_comandos_usuario, &comando_usuario, portMAX_DELAY);
+                tocar_beep(100, 0, 2000); // 1 beep a 2000 Hz
             }
         }
         else if (gpio_get(PINO_BOTAO_A))
@@ -441,6 +484,7 @@ static void tarefa_entrada(void *pvParameters)
                 comando_usuario.tipo = COMANDO_TELA_ANTERIOR;
                 comando_usuario.valor = 0;
                 xQueueSend(fila_comandos_usuario, &comando_usuario, portMAX_DELAY);
+                tocar_beep(100, 0, 2000); // 1 beep a 2000 Hz
             }
         }
         else if (gpio_get(PINO_BOTAO_B))
@@ -479,7 +523,7 @@ static void renderizar_tela_resumo(float temp_atual, float temp_prevista, int te
     ssd1306_draw_string(&display, linha_str, 0, 0, false);
 
     snprintf(linha_str, sizeof(linha_str), "Temp atual:%.1fC", temp_atual);
-    ssd1306_draw_string(&display, linha_str, 0, 14, false);  // Corrigido: linha_str em vez de linha_str[0]
+    ssd1306_draw_string(&display, linha_str, 0, 14, false);
 
     snprintf(linha_str, sizeof(linha_str), "Prev. 5min:%.1fC", temp_prevista);
     ssd1306_draw_string(&display, linha_str, 0, 28, false);
@@ -492,7 +536,7 @@ static void renderizar_tela_resumo(float temp_atual, float temp_prevista, int te
 
 static void tarefa_display(void *pvParameters)
 {
-    uint32_t valor_notificacao;  // Declarada corretamente como uint32_t
+    uint32_t valor_notificacao;
     DadosTemperatura_t dados_temp;
     ResultadosPrevisao_t resultados_previsao;
     ComandoUsuario_t comando_usuario;
@@ -500,7 +544,7 @@ static void tarefa_display(void *pvParameters)
     while (1)
     {
         // Aguarda dados ou timeout para atualizar o display
-        xTaskNotifyWait(0, ULONG_MAX, &valor_notificacao, pdMS_TO_TICKS(TIMEOUT_ATUALIZACAO_DISPLAY_MS));  // Corrigido: &valor_notificacao
+        xTaskNotifyWait(0, ULONG_MAX, &valor_notificacao, pdMS_TO_TICKS(TIMEOUT_ATUALIZACAO_DISPLAY_MS));
 
         // Recebe dados de temperatura (se disponíveis)
         if (xQueueReceive(fila_dados_temperatura, &dados_temp, 0) == pdTRUE)
@@ -552,10 +596,10 @@ static void tarefa_display(void *pvParameters)
         EstadoSistemaLeitura_t leitura_estado;
         ler_estado_sistema(&leitura_estado);
 
-        // Determina a situação
+        // Determina a situcao
         const char *situacao = determinar_situacao(leitura_estado.temperatura_atual, leitura_estado.temperatura_prevista, leitura_estado.temperatura_urgencia);
 
-        // Atualiza LEDs e matriz de LED
+        // Atualiza LEDs, matriz e buzzer
         atualizar_indicadores_visuais(situacao, leitura_estado.configuracao_concluida);
 
         // Renderiza o display OLED
@@ -591,9 +635,10 @@ int main(void)
 {
     // Inicialização do hardware
     stdio_init_all(); // Inicializa comunicação serial
+    printf("Iniciando sistema...\n");
 
     // Configura I2C para o display OLED
-    i2c_init(i2c1, 100 * 1000);
+    i2c_init(i2c1, 400 * 1000);
     gpio_set_function(PINO_SDA_I2C, GPIO_FUNC_I2C);
     gpio_set_function(PINO_SCL_I2C, GPIO_FUNC_I2C);
     gpio_pull_up(PINO_SDA_I2C);
@@ -622,6 +667,18 @@ int main(void)
     gpio_set_dir(PINO_LED_VERDE, GPIO_OUT);
     gpio_init(PINO_LED_VERMELHO);
     gpio_set_dir(PINO_LED_VERMELHO, GPIO_OUT);
+
+    // Configura o buzzer com PWM
+    gpio_set_function(PINO_BUZZER, GPIO_FUNC_PWM);
+    slice_buzzer = pwm_gpio_to_slice_num(PINO_BUZZER);
+    channel_buzzer = pwm_gpio_to_channel(PINO_BUZZER);
+
+    pwm_set_clkdiv(slice_buzzer, 125.0f);                 // 125 MHz / 125 = 1 MHz
+    uint32_t wrap = (1000000 / 2000) - 1;                 /* 2000 Hz base */
+    pwm_set_wrap(slice_buzzer, wrap);
+    pwm_set_chan_level(slice_buzzer, channel_buzzer, wrap / 2); /* 50 % duty */
+    pwm_set_enabled(slice_buzzer, false);                 /* inicia desligado */
+    printf("Buzzer configurado como PWM no GPIO %d, frequencia base 2000 Hz\n", PINO_BUZZER);
 
     // Inicializa o sensor de temperatura
     ds18b20_init(PINO_DS18B20);
