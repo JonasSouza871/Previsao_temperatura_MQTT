@@ -15,9 +15,9 @@ const CorRGB PALETA_CORES[] = {
     {"---",       0,   0,   0}
 };
 
-const uint8_t PAD_OK[5]  = {0b00001,0b00010,0b00100,0b11000,0b10000};  // Padrão "✓" para verde
-const uint8_t PAD_EXC[5] = {0b00100,0b00100,0b00100,0b00000,0b00100};  // Padrão "!" para amarelo
-const uint8_t PAD_X[5]   = {0b10001,0b01010,0b00100,0b01010,0b10001};  // Padrão "X" para vermelho
+const uint8_t PAD_OK[5]  = {0b01010, 0b11111, 0b11111, 0b01110, 0b00100};  // Padrão "coração" para verde
+const uint8_t PAD_EXC[5] = {0b00100, 0b00100, 0b00100, 0b00000, 0b00100};  // Padrão "!" para amarelo
+const uint8_t PAD_X[5]   = {0b10001, 0b01010, 0b00100, 0b01010, 0b10001};  // Padrão "X" para vermelho
 
 // Novos padrões de números (invertidos)
 const bool padrao_numeros[10][25] = {

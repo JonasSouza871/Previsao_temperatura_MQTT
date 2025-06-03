@@ -29,9 +29,9 @@ extern const CorRGB PALETA_CORES[];
 #define COR_BRANCO    GRB(255, 255, 255)  // Branco
 #define COR_PRATA     GRB(192, 192, 192)  // Prata
 #define COR_CINZA     GRB(40, 35, 35)     // Cinza
-#define COR_VIOLETA   GRB(130, 0, 130)     // Violeta
+#define COR_VIOLETA   GRB(130, 0, 130)    // Violeta
 #define COR_AZUL      GRB(0, 0, 200)      // Azul
-#define COR_MARROM    GRB(30, 10, 10)      // Marrom
+#define COR_MARROM    GRB(30, 10, 10)     // Marrom
 #define COR_VERDE     GRB(0, 150, 0)      // Verde
 #define COR_OURO      GRB(218, 165, 32)   // Ouro
 #define COR_LARANJA   GRB(255, 65, 0)     // Laranja

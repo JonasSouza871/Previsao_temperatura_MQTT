@@ -13,6 +13,7 @@
 #include "task.h"
 #include "semphr.h"
 #include "queue.h"
+#include "matriz_led.h"
 
 // ================================================================================================
 // CONFIGURAÇÕES E DEFINIÇÕES
@@ -37,6 +38,7 @@
 #define DEBOUNCE_JOYSTICK_MS 300 // Tempo de debounce para o joystick (ms)
 #define DEBOUNCE_BOTAO_MS 50 // Tempo de debounce para os botões (ms)
 #define TIMEOUT_ATUALIZACAO_DISPLAY_MS 100 // Timeout para atualização do display (ms)
+#define PISCAR_INTERVALO_MS 500 // Intervalo para piscar LEDs/matriz no estado "Grave"
 
 // Estruturas para filas
 typedef struct
@@ -75,6 +77,7 @@ typedef struct
     float temperatura_atual; // Temperatura atual lida pelo sensor
     float temperatura_prevista; // Temperatura prevista para o futuro
     int tela_atual; // Tela atual exibida (0=urgência, 1=resumo)
+    bool configuracao_concluida; // Indica se a temperatura de urgência foi configurada
 } EstadoSistema_t;
 
 // Dados de previsão de temperatura
@@ -86,12 +89,23 @@ typedef struct
     bool historico_preenchido; // Indica se o histórico está cheio
 } PrevisaoTemperatura_t;
 
+// Estrutura para leitura segura do estado
+typedef struct
+{
+    float temperatura_atual;
+    float temperatura_prevista;
+    int temperatura_urgencia;
+    int tela_atual;
+    bool configuracao_concluida;
+} EstadoSistemaLeitura_t;
+
 // Variáveis globais
 static EstadoSistema_t estado_sistema = {
     .temperatura_urgencia = 30, // Valor inicial do limite de urgência
     .temperatura_atual = 0.0, // Valor inicial da temperatura atual
     .temperatura_prevista = 0.0, // Valor inicial da temperatura prevista
-    .tela_atual = 0 // Tela inicial (urgência)
+    .tela_atual = 0, // Tela inicial (urgência)
+    .configuracao_concluida = false // Configuração inicial não concluída
 };
 
 static PrevisaoTemperatura_t previsao_temperatura = {0}; // Inicializa estrutura de previsão
@@ -108,6 +122,128 @@ static TaskHandle_t tarefa_entrada_handle; // Handle da task de entrada
 static QueueHandle_t fila_dados_temperatura; // Fila para dados de temperatura
 static QueueHandle_t fila_resultados_previsao; // Fila para resultados de previsão
 static QueueHandle_t fila_comandos_usuario; // Fila para comandos do usuário
+
+// Variáveis para controle de piscar
+static TickType_t ultimo_piscar = 0;
+static bool visivel = true;
+
+// ================================================================================================
+// FUNÇÕES AUXILIARES - GERENCIAMENTO DE ESTADO
+// ================================================================================================
+
+// Lê o estado do sistema de forma segura
+static void ler_estado_sistema(EstadoSistemaLeitura_t *leitura)
+{
+    if (xSemaphoreTake(mutex_estado_sistema, pdMS_TO_TICKS(10)) == pdTRUE)
+    {
+        leitura->temperatura_atual = estado_sistema.temperatura_atual;
+        leitura->temperatura_prevista = estado_sistema.temperatura_prevista;
+        leitura->temperatura_urgencia = estado_sistema.temperatura_urgencia;
+        leitura->tela_atual = estado_sistema.tela_atual;
+        leitura->configuracao_concluida = estado_sistema.configuracao_concluida;
+        xSemaphoreGive(mutex_estado_sistema);
+    }
+    else
+    {
+        leitura->temperatura_atual = -99.9;
+        leitura->temperatura_prevista = -99.9;
+        leitura->temperatura_urgencia = 0;
+        leitura->tela_atual = -1;
+        leitura->configuracao_concluida = false;
+    }
+}
+
+// Determina a situação com base na tabela
+static const char *determinar_situacao(float temp_atual, float temp_prevista, int temp_urgencia)
+{
+    float diferenca = temp_urgencia - temp_prevista;
+    if (temp_atual > temp_urgencia)
+    {
+        return "Grave";
+    }
+    else if (diferenca > 5.0)
+    {
+        return "Normal";
+    }
+    else if (diferenca >= 0.0 && diferenca <= 5.0)
+    {
+        return "Atencao";
+    }
+    else if (diferenca < 0.0)
+    {
+        return "Alerta";
+    }
+    return "Desconhecida";
+}
+
+// Atualiza LEDs e matriz de LED com base na situação
+static void atualizar_indicadores_visuais(const char *situacao, bool config_concluida)
+{
+    const char *cor = "Desconhecida";
+
+    if (!config_concluida)
+    {
+        // Configuração não concluída: desliga LEDs e matriz
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, 0);
+        matriz_clear();
+        return;
+    }
+
+    // Configuração concluída: atualiza LEDs e matriz
+    if (strcmp(situacao, "Normal") == 0)
+    {
+        gpio_put(PINO_LED_VERDE, 1);
+        gpio_put(PINO_LED_VERMELHO, 0);
+        matriz_draw_pattern(PAD_OK, COR_VERDE); // Padrão "coração"
+        cor = "Verde";
+    }
+    else if (strcmp(situacao, "Atencao") == 0)
+    {
+        gpio_put(PINO_LED_VERDE, 1);
+        gpio_put(PINO_LED_VERMELHO, 1);
+        matriz_draw_pattern(PAD_EXC, COR_AMARELO); // Padrão "!"
+        cor = "Amarelo";
+    }
+    else if (strcmp(situacao, "Alerta") == 0)
+    {
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, 1);
+        matriz_draw_pattern(PAD_X, COR_VERMELHO); // Padrão "X"
+        cor = "Vermelho";
+    }
+    else if (strcmp(situacao, "Grave") == 0)
+    {
+        TickType_t tick_atual = xTaskGetTickCount();
+        if ((tick_atual - ultimo_piscar) > pdMS_TO_TICKS(PISCAR_INTERVALO_MS))
+        {
+            visivel = !visivel;
+            ultimo_piscar = tick_atual;
+        }
+
+        // Pisca LED vermelho
+        gpio_put(PINO_LED_VERMELHO, visivel ? 1 : 0);
+        gpio_put(PINO_LED_VERDE, 0);
+
+        // Pisca matriz
+        if (visivel)
+        {
+            matriz_draw_pattern(PAD_X, COR_VERMELHO); // Padrão "X"
+        }
+        else
+        {
+            matriz_clear();
+        }
+        cor = "Vermelho";
+    }
+    else
+    {
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, 0);
+        matriz_clear();
+        cor = "Desligado";
+    }
+}
 
 // ================================================================================================
 // FUNÇÕES AUXILIARES - REGRESSÃO LINEAR
@@ -221,7 +357,7 @@ static void tarefa_temperatura(void *pvParameters)
             resultados_previsao.previsao_linear = calcular_previsao_temperatura(tempo_atual);
             xQueueSend(fila_resultados_previsao, &resultados_previsao, portMAX_DELAY);
 
-            // Atualiza o estado do sistema com a nova temperatura (opcional, dependendo do design)
+            // Atualiza o estado do sistema com a nova temperatura
             if (xSemaphoreTake(mutex_estado_sistema, portMAX_DELAY) == pdTRUE)
             {
                 estado_sistema.temperatura_atual = temperatura_filtrada;
@@ -251,7 +387,9 @@ static void tarefa_entrada(void *pvParameters)
         TickType_t tick_atual = xTaskGetTickCount(); // Tempo atual
 
         // Ajusta a temperatura de urgência com base no joystick (tela de configuração)
-        if (estado_sistema.tela_atual == 0)
+        EstadoSistemaLeitura_t leitura_estado;
+        ler_estado_sistema(&leitura_estado);
+        if (leitura_estado.tela_atual == 0)
         {
             if ((tick_atual - ultima_mudanca_joystick) > pdMS_TO_TICKS(DEBOUNCE_JOYSTICK_MS))
             {
@@ -282,7 +420,7 @@ static void tarefa_entrada(void *pvParameters)
         if (!gpio_get(PINO_BOTAO_A) && !botao_a_pressionado)
         {
             botao_a_pressionado = true;
-            if (estado_sistema.tela_atual == 0)
+            if (leitura_estado.tela_atual == 0)
             {
                 comando_usuario.tipo = COMANDO_PROXIMA_TELA;
                 comando_usuario.valor = 0;
@@ -298,7 +436,7 @@ static void tarefa_entrada(void *pvParameters)
         if (!gpio_get(PINO_BOTAO_B) && !botao_b_pressionado)
         {
             botao_b_pressionado = true;
-            if (estado_sistema.tela_atual != 0)
+            if (leitura_estado.tela_atual != 0)
             {
                 comando_usuario.tipo = COMANDO_TELA_ANTERIOR;
                 comando_usuario.valor = 0;
@@ -318,14 +456,14 @@ static void tarefa_entrada(void *pvParameters)
 // TASK 3: CONTROLE DO DISPLAY
 // ================================================================================================
 
-static void renderizar_tela_configuracao(void)
+static void renderizar_tela_configuracao(int temp_urgencia)
 {
     // Exibe a tela de configuração da temperatura de urgência
     ssd1306_draw_string(&display, "Temperatura", 20, 0, false);
     ssd1306_draw_string(&display, "Urgencia", 32, 16, false);
 
     char texto_temp[10];
-    snprintf(texto_temp, sizeof(texto_temp), "%d C", estado_sistema.temperatura_urgencia);
+    snprintf(texto_temp, sizeof(texto_temp), "%d C", temp_urgencia);
 
     // Centraliza o texto da temperatura no display
     int largura_texto = strlen(texto_temp) * 6;
@@ -333,119 +471,36 @@ static void renderizar_tela_configuracao(void)
     ssd1306_draw_string(&display, texto_temp, centro_x, 40, false);
 }
 
-static void renderizar_tela_resumo(void)
+static void renderizar_tela_resumo(float temp_atual, float temp_prevista, int temp_urgencia, const char *situacao)
 {
     char linha_str[25];
-    float temp_atual_local, temp_prevista_local;
-    float diferenca = 0.0;
-    const char *situacao = "Desconhecida";
-    const char *cor = "Desconhecida";
 
-    // Obtém os valores de temperatura com segurança
-    if (xSemaphoreTake(mutex_estado_sistema, pdMS_TO_TICKS(10)) == pdTRUE)
-    {
-        temp_atual_local = estado_sistema.temperatura_atual;
-        temp_prevista_local = estado_sistema.temperatura_prevista;
-        diferenca = estado_sistema.temperatura_urgencia - temp_prevista_local;
-        xSemaphoreGive(mutex_estado_sistema);
-    }
-    else
-    {
-        temp_atual_local = -99.9;
-        temp_prevista_local = -99.9;
-    }
-
-    // Determina a situação com base na tabela
-    if (xSemaphoreTake(mutex_estado_sistema, pdMS_TO_TICKS(10)) == pdTRUE)
-    {
-        if (estado_sistema.temperatura_atual > estado_sistema.temperatura_urgencia)
-        {
-            situacao = "Grave";
-        }
-        else if (diferenca > 5.0)
-        {
-            situacao = "Normal";
-        }
-        else if (diferenca >= 0.0 && diferenca <= 5.0)
-        {
-            situacao = "Atencao";
-        }
-        else if (diferenca < 0.0)
-        {
-            situacao = "Alerta";
-        }
-        xSemaphoreGive(mutex_estado_sistema);
-    }
-
-    // Exibe informações na tela de resumo
-    snprintf(linha_str, sizeof(linha_str), "Temp urg: %d C", estado_sistema.temperatura_urgencia);
+    snprintf(linha_str, sizeof(linha_str), "Temp urg: %d C", temp_urgencia);
     ssd1306_draw_string(&display, linha_str, 0, 0, false);
 
-    snprintf(linha_str, sizeof(linha_str), "Temp atual:%.1fC", temp_atual_local);
-    ssd1306_draw_string(&display, linha_str, 0, 14, false);
+    snprintf(linha_str, sizeof(linha_str), "Temp atual:%.1fC", temp_atual);
+    ssd1306_draw_string(&display, linha_str, 0, 14, false);  // Corrigido: linha_str em vez de linha_str[0]
 
-    snprintf(linha_str, sizeof(linha_str), "Prev. 5min:%.1fC", temp_prevista_local);
+    snprintf(linha_str, sizeof(linha_str), "Prev. 5min:%.1fC", temp_prevista);
     ssd1306_draw_string(&display, linha_str, 0, 28, false);
 
     snprintf(linha_str, sizeof(linha_str), "Situacao:%s", situacao);
     ssd1306_draw_string(&display, linha_str, 0, 42, false);
 
-    // Controle do LED RGB com base na situação e determina a cor
-    if (strcmp(situacao, "Normal") == 0)
-    {
-        gpio_put(PINO_LED_VERDE, 1);
-        gpio_put(PINO_LED_VERMELHO, 0);
-        cor = "Verde";
-    }
-    else if (strcmp(situacao, "Atencao") == 0)
-    {
-        gpio_put(PINO_LED_VERDE, 1);
-        gpio_put(PINO_LED_VERMELHO, 1);
-        cor = "Amarelo";
-    }
-    else if (strcmp(situacao, "Alerta") == 0)
-    {
-        gpio_put(PINO_LED_VERDE, 0);
-        gpio_put(PINO_LED_VERMELHO, 1);
-        cor = "Vermelho";
-    }
-    else if (strcmp(situacao, "Grave") == 0)
-    {
-        // Pisca o LED vermelho a cada 500 ms
-        static TickType_t ultimo_piscar = 0;
-        TickType_t tick_atual = xTaskGetTickCount();
-        if ((tick_atual - ultimo_piscar) > pdMS_TO_TICKS(500))
-        {
-            static bool led_ligado = false;
-            led_ligado = !led_ligado;
-            gpio_put(PINO_LED_VERMELHO, led_ligado);
-            gpio_put(PINO_LED_VERDE, 0); // Garante que o LED verde está desligado
-            ultimo_piscar = tick_atual;
-        }
-        cor = "Vermelho";
-    }
-    else
-    {
-        gpio_put(PINO_LED_VERDE, 0);
-        gpio_put(PINO_LED_VERMELHO, 0);
-        cor = "Desligado";
-    }
-
-    snprintf(linha_str, sizeof(linha_str), "Cor:%s", cor);
-    ssd1306_draw_string(&display, linha_str, 0, 56, false);
+    // A cor é gerenciada automaticamente por atualizar_indicadores_visuais
 }
 
 static void tarefa_display(void *pvParameters)
 {
-    uint32_t valor_notificacao;
+    uint32_t valor_notificacao;  // Declarada corretamente como uint32_t
     DadosTemperatura_t dados_temp;
     ResultadosPrevisao_t resultados_previsao;
     ComandoUsuario_t comando_usuario;
 
     while (1)
     {
-        // Aguarda notificação ou timeout para atualizar o display
-        xTaskNotifyWait(0x00, ULONG_MAX, &valor_notificacao, pdMS_TO_TICKS(TIMEOUT_ATUALIZACAO_DISPLAY_MS));
+        // Aguarda dados ou timeout para atualizar o display
+        xTaskNotifyWait(0, ULONG_MAX, &valor_notificacao, pdMS_TO_TICKS(TIMEOUT_ATUALIZACAO_DISPLAY_MS));  // Corrigido: &valor_notificacao
 
         // Recebe dados de temperatura (se disponíveis)
         if (xQueueReceive(fila_dados_temperatura, &dados_temp, 0) == pdTRUE)
@@ -476,9 +531,11 @@ static void tarefa_display(void *pvParameters)
                 {
                 case COMANDO_PROXIMA_TELA:
                     estado_sistema.tela_atual = 1;
+                    estado_sistema.configuracao_concluida = true;
                     break;
                 case COMANDO_TELA_ANTERIOR:
                     estado_sistema.tela_atual = 0;
+                    estado_sistema.configuracao_concluida = false;
                     break;
                 case COMANDO_AJUSTAR_URGENCIA_SUBIR:
                     estado_sistema.temperatura_urgencia += comando_usuario.valor;
@@ -491,18 +548,28 @@ static void tarefa_display(void *pvParameters)
             }
         }
 
+        // Lê o estado atual do sistema
+        EstadoSistemaLeitura_t leitura_estado;
+        ler_estado_sistema(&leitura_estado);
+
+        // Determina a situação
+        const char *situacao = determinar_situacao(leitura_estado.temperatura_atual, leitura_estado.temperatura_prevista, leitura_estado.temperatura_urgencia);
+
+        // Atualiza LEDs e matriz de LED
+        atualizar_indicadores_visuais(situacao, leitura_estado.configuracao_concluida);
+
+        // Renderiza o display OLED
         if (xSemaphoreTake(mutex_display, portMAX_DELAY) == pdTRUE)
         {
             ssd1306_fill(&display, false); // Limpa o display
 
-            // Renderiza a tela apropriada com base no estado
-            switch (estado_sistema.tela_atual)
+            switch (leitura_estado.tela_atual)
             {
             case 0:
-                renderizar_tela_configuracao();
+                renderizar_tela_configuracao(leitura_estado.temperatura_urgencia);
                 break;
             case 1:
-                renderizar_tela_resumo();
+                renderizar_tela_resumo(leitura_estado.temperatura_atual, leitura_estado.temperatura_prevista, leitura_estado.temperatura_urgencia, situacao);
                 break;
             default:
                 ssd1306_draw_string(&display, "Erro: Tela", 0, 0, false);
@@ -558,6 +625,9 @@ int main(void)
 
     // Inicializa o sensor de temperatura
     ds18b20_init(PINO_DS18B20);
+
+    // Inicializa a matriz de LED
+    inicializar_matriz_led();
 
     // Inicialização das estruturas de dados
     for (int i = 0; i < TAMANHO_HISTORICO_TEMP; i++)

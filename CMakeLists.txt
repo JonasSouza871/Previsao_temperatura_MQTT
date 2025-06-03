@@ -92,6 +92,7 @@ target_link_libraries(PicoMQTT
     pico_lwip_mbedtls                          # Integração do LwIP com mbedTLS
     FreeRTOS-Kernel                            # Kernel do FreeRTOS
     FreeRTOS-Kernel-Heap4                     # Gerenciador de memória do FreeRTOS
+    hardware_pwm                               # PWM
 )
 
 # Gera arquivos de saída adicionais (ex: .uf2, .hex) para gravação no microcontrolador
