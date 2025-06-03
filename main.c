@@ -29,7 +29,7 @@
 // Configurações do sistema de previsão
 #define TAMANHO_HISTORICO_TEMP           30      // Armazena as últimas 30 leituras (5 minutos de histórico)
 #define INTERVALO_PREVISAO_SEGUNDOS      300     // Previsão para 5 minutos no futuro
-#define INTERVALO_LEITURA_SEGUNDOS       5       // Intervalo entre leituras de temperatura (alterado de 10 para 5 segundos)
+#define INTERVALO_LEITURA_SEGUNDOS       5       // Intervalo entre leituras de temperatura
 
 // Constantes do sistema
 #define DEBOUNCE_JOYSTICK_MS        300     // Tempo de debounce para o joystick (ms)
@@ -302,15 +302,32 @@ static void renderizar_tela_configuracao(void) {
 static void renderizar_tela_resumo(void) {
     char linha_str[25];
     float temp_atual_local, temp_prevista_local;
+    float diferenca = 0.0;
+    const char *situacao = "Desconhecida";
 
     // Obtém os valores de temperatura com segurança
     if (xSemaphoreTake(mutex_estado_sistema, pdMS_TO_TICKS(10)) == pdTRUE) {
         temp_atual_local = estado_sistema.temperatura_atual;
         temp_prevista_local = estado_sistema.temperatura_prevista;
+        diferenca = estado_sistema.temperatura_urgencia - temp_prevista_local;
         xSemaphoreGive(mutex_estado_sistema);
     } else {
         temp_atual_local = -99.9;
         temp_prevista_local = -99.9;
+    }
+
+    // Determina a situação com base na tabela
+    if (xSemaphoreTake(mutex_estado_sistema, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (estado_sistema.temperatura_atual > estado_sistema.temperatura_urgencia) {
+            situacao = "Grave";
+        } else if (diferenca > 5.0) {
+            situacao = "Normal";
+        } else if (diferenca >= 0.0 && diferenca <= 5.0) {
+            situacao = "Atencao";
+        } else if (diferenca < 0.0) {
+            situacao = "Alerta";
+        }
+        xSemaphoreGive(mutex_estado_sistema);
     }
 
     // Exibe informações na tela de resumo
@@ -323,8 +340,10 @@ static void renderizar_tela_resumo(void) {
     snprintf(linha_str, sizeof(linha_str), "Prev. 5min:%.1fC", temp_prevista_local);
     ssd1306_draw_string(&display, linha_str, 0, 28, false);
 
-    ssd1306_draw_string(&display, "Cor:valor", 0, 42, false);
-    ssd1306_draw_string(&display, "Situacao:valor", 0, 56, false);
+    snprintf(linha_str, sizeof(linha_str), "Situacao:%s", situacao);
+    ssd1306_draw_string(&display, linha_str, 0, 42, false);
+
+    ssd1306_draw_string(&display, "Cor:valor", 0, 56, false);
 }
 
 static void tarefa_display(void *pvParameters) {
