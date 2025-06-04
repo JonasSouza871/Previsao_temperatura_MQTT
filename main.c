@@ -23,267 +23,362 @@
 #include "matriz_led.h"
 
 /*============================================================================
- *  CONFIGURAÇÃO DE REDE  ↴  AJUSTE AQUI
+ * CONFIGURAÇÃO DE REDE
+ * Esta seção define as credenciais de rede e MQTT. Ajuste conforme necessário.
  *===========================================================================*/
 #define WIFI_SSID       ""
 #define WIFI_PASSWORD   ""
 #define MQTT_SERVER     ""   // IP do broker ou hostname
-#define MQTT_USERNAME   "" //"" se broker anônimo
+#define MQTT_USERNAME   ""         // Deixe "" se broker anônimo
 #define MQTT_PASSWORD   ""           // Deixe "" se broker anônimo
 
 /*============================================================================
- *  HARDWARE (mesmo do projeto original)
+ * DEFINIÇÕES DE HARDWARE
+ * Pinos usados no projeto.
  *===========================================================================*/
-#define PINO_SDA_I2C        14
-#define PINO_SCL_I2C        15
-#define PINO_ADC            26
-#define PINO_BOTAO_A        5
-#define PINO_BOTAO_B        6
-#define PINO_DS18B20        16
-#define PINO_LED_VERDE      11
-#define PINO_LED_VERMELHO   13
-#define PINO_BUZZER         10
+#define PINO_SDA_I2C        14        // Pino SDA para I2C
+#define PINO_SCL_I2C        15        // Pino SCL para I2C
+#define PINO_ADC            26        // Pino para entrada analógica
+#define PINO_BOTAO_A        5         // Pino do botão A
+#define PINO_BOTAO_B        6         // Pino do botão B
+#define PINO_DS18B20        16        // Pino do sensor de temperatura DS18B20
+#define PINO_LED_VERDE      11        // Pino do LED verde
+#define PINO_LED_VERMELHO   13        // Pino do LED vermelho
+#define PINO_BUZZER         10        // Pino do buzzer
 
 /*============================================================================
- *  LÓGICA DE APLICAÇÃO
+ * PARÂMETROS DA LÓGICA DE APLICAÇÃO
+ * Constantes que controlam o comportamento do sistema.
  *===========================================================================*/
-#define TAMANHO_HISTORICO_TEMP      30
-#define INTERVALO_PREVISAO_SEGUNDOS 300
-#define INTERVALO_LEITURA_SEGUNDOS  5
+#define TAMANHO_HISTORICO_TEMP      30    // Tamanho do histórico de temperaturas
+#define INTERVALO_PREVISAO_SEGUNDOS 300   // Intervalo para previsão (segundos)
+#define INTERVALO_LEITURA_SEGUNDOS  5     // Intervalo de leitura da temperatura (segundos)
 
-#define DEBOUNCE_JOYSTICK_MS        300
-#define DEBOUNCE_BOTAO_MS           50
-#define TIMEOUT_ATUALIZACAO_DISPLAY_MS 100
-#define PISCAR_INTERVALO_MS         500
+#define DEBOUNCE_JOYSTICK_MS        300   // Tempo de debounce para joystick (ms)
+#define DEBOUNCE_BOTAO_MS           50    // Tempo de debounce para botões (ms)
+#define TIMEOUT_ATUALIZACAO_DISPLAY_MS 100 // Timeout para atualização do display (ms)
+#define PISCAR_INTERVALO_MS         500   // Intervalo de piscar dos indicadores (ms)
 
-/* ---------- Holt ---------- */
-#define ALPHA_HOLT 0.3f   /* suavização nível   */
-#define BETA_HOLT  0.1f   /* suavização tendência */
+/* Constantes do método Holt para previsão */
+#define ALPHA_HOLT 0.3f   // Fator de suavização do nível
+#define BETA_HOLT  0.1f   // Fator de suavização da tendência
 
 /*============================================================================
- *  MQTT
+ * CONFIGURAÇÃO MQTT
+ * Parâmetros para comunicação com o broker MQTT.
  *===========================================================================*/
-#define MQTT_TOPIC_BASE             "/Temperatura_MQTT_Pico"
-#define MQTT_KEEP_ALIVE_S           60
-#define TEMP_PUBLISH_INTERVAL_S     10
-#define MQTT_SUBSCRIBE_QOS          1
-#define MQTT_PUBLISH_QOS            1
-#define MQTT_PUBLISH_RETAIN         0
-#define MQTT_WILL_TOPIC             "/online"
-#define MQTT_WILL_MSG               "0"
-#define MQTT_WILL_QOS               1
-#define MQTT_DEVICE_NAME            "pico"
-#define MQTT_TOPIC_LEN              100
+#define MQTT_TOPIC_BASE             "/Temperatura_MQTT_Pico" // Tópico base MQTT
+#define MQTT_KEEP_ALIVE_S           60    // Tempo de keep-alive (segundos)
+#define TEMP_PUBLISH_INTERVAL_S     10    // Intervalo de publicação (segundos)
+#define MQTT_SUBSCRIBE_QOS          1     // QoS para subscrição
+#define MQTT_PUBLISH_QOS            1     // QoS para publicação
+#define MQTT_PUBLISH_RETAIN         0     // Retenção de mensagens (0 = não)
+#define MQTT_WILL_TOPIC             "/online" // Tópico de última vontade
+#define MQTT_WILL_MSG               "0"   // Mensagem de última vontade
+#define MQTT_WILL_QOS               1     // QoS da última vontade
+#define MQTT_DEVICE_NAME            "pico" // Nome do dispositivo
+#define MQTT_TOPIC_LEN              100   // Tamanho máximo do tópico
 
 /*============================================================================
- *  ESTRUTURAS
+ * ESTRUTURAS DE DADOS
+ * Definições de tipos usados no sistema.
  *===========================================================================*/
 typedef struct {
-    float temperatura;
-    TickType_t marca_tempo;
+    float temperatura;      // Temperatura registrada
+    TickType_t marca_tempo; // Marca de tempo da leitura
 } DadosTemperatura_t;
 
 typedef struct {
-    float previsao_linear;
-    float previsao_holt;
+    float previsao_linear;  // Previsão por regressão linear
+    float previsao_holt;    // Previsão por suavização Holt
 } ResultadosPrevisao_t;
 
 typedef enum {
-    COMANDO_PROXIMA_TELA,
-    COMANDO_TELA_ANTERIOR,
-    COMANDO_AJUSTAR_URGENCIA_SUBIR,
-    COMANDO_AJUSTAR_URGENCIA_DESCER
+    COMANDO_PROXIMA_TELA,       // Avança para a próxima tela
+    COMANDO_TELA_ANTERIOR,      // Retorna à tela anterior
+    COMANDO_AJUSTAR_URGENCIA_SUBIR,  // Aumenta temperatura de urgência
+    COMANDO_AJUSTAR_URGENCIA_DESCER  // Diminui temperatura de urgência
 } TipoComando_t;
 
-typedef struct { TipoComando_t tipo; int valor; } ComandoUsuario_t;
+typedef struct {
+    TipoComando_t tipo;     // Tipo do comando
+    int valor;              // Valor associado ao comando
+} ComandoUsuario_t;
 
 typedef struct {
-    int   temperatura_urgencia;
-    float temperatura_atual;
-    float temperatura_prevista;       /* regressão linear  */
-    float temperatura_prevista_holt;  /* Suavização Holt   */
-    int   tela_atual;
-    bool  configuracao_concluida;
+    int   temperatura_urgencia;      // Limite de temperatura crítica
+    float temperatura_atual;         // Temperatura atual
+    float temperatura_prevista;      // Previsão por regressão linear
+    float temperatura_prevista_holt; // Previsão por suavização Holt
+    int   tela_atual;                // Tela exibida no display
+    bool  configuracao_concluida;    // Estado da configuração
 } EstadoSistema_t;
 
 typedef struct {
-    float historico_temperatura[TAMANHO_HISTORICO_TEMP];
-    float historico_tempo[TAMANHO_HISTORICO_TEMP];
-    int   indice_historico;
-    bool  historico_preenchido;
+    float historico_temperatura[TAMANHO_HISTORICO_TEMP]; // Histórico de temperaturas
+    float historico_tempo[TAMANHO_HISTORICO_TEMP];       // Histórico de tempos
+    int   indice_historico;       // Índice atual no histórico
+    bool  historico_preenchido;   // Indica se o histórico está completo
 } PrevisaoTemperatura_t;
 
-/* ---------- MQTT ---------- */
 typedef struct {
-    mqtt_client_t *inst;
-    struct mqtt_connect_client_info_t info;
-    ip_addr_t server_addr;
-    char topic[MQTT_TOPIC_LEN];
-    char data[64];
-    bool conectado;
-} MQTT_STATE_t;
+    mqtt_client_t *inst;          // Instância do cliente MQTT
+    struct mqtt_connect_client_info_t info; // Informações de conexão
+    ip_addr_t server_addr;        // Endereço do servidor MQTT
+    char topic[MQTT_TOPIC_LEN];   // Tópico atual
+    char data[64];                // Dados recebidos
+    bool conectado;               // Estado da conexão
+} EstadoMQTT_t;
 
 /*============================================================================
- *  VARIÁVEIS GLOBAIS
+ * VARIÁVEIS GLOBAIS
+ * Variáveis compartilhadas entre as tarefas.
  *===========================================================================*/
 static EstadoSistema_t       estado_sistema = { .temperatura_urgencia = 30 };
 static PrevisaoTemperatura_t previsao       = {0};
 static ssd1306_t             display;
 
-static SemaphoreHandle_t mutex_estado, mutex_display;
-static QueueHandle_t     q_temp, q_prev, q_cmd;
+static SemaphoreHandle_t mutex_estado;     // Mutex para proteger estado_sistema
+static SemaphoreHandle_t mutex_display;    // Mutex para proteger o display
+static QueueHandle_t     q_temp;           // Fila para dados de temperatura
+static QueueHandle_t     q_prev;           // Fila para previsões
+static QueueHandle_t     q_cmd;            // Fila para comandos do usuário
 
-static uint slice_buzzer, channel_buzzer;
+static uint slice_buzzer;      // Slice PWM do buzzer
+static uint channel_buzzer;    // Canal PWM do buzzer
 
-static MQTT_STATE_t mqtt_state;
+static EstadoMQTT_t mqtt_state; // Estado da conexão MQTT
 
 /*============================================================================
- *  MACROS / HELPERS
+ * FUNÇÕES AUXILIARES
+ * Funções utilitárias para simplificar a lógica.
  *===========================================================================*/
-static inline const char *topic_full(const char *sufixo){
+
+// Constrói um tópico MQTT completo concatenando o sufixo ao tópico base
+static inline const char *topico_completo(const char *sufixo) {
     static char buf[MQTT_TOPIC_LEN];
     snprintf(buf, sizeof(buf), MQTT_TOPIC_BASE "%s", sufixo);
     return buf;
 }
 
-static void ler_estado(EstadoSistema_t *dst){
-    if (xSemaphoreTake(mutex_estado, pdMS_TO_TICKS(5))){
-        *dst = estado_sistema;
+// Lê o estado do sistema de forma segura usando mutex
+static void ler_estado(EstadoSistema_t *destino) {
+    if (xSemaphoreTake(mutex_estado, pdMS_TO_TICKS(5))) {
+        *destino = estado_sistema;
         xSemaphoreGive(mutex_estado);
-    } else memset(dst, 0, sizeof(*dst));
+    } else {
+        memset(destino, 0, sizeof(*destino));
+    }
 }
 
-static const char *situacao(float t, float tprev, int urg){
-    float d = urg - tprev;
-    if (t > urg)      return "Grave";
-    if (d > 5.0f)     return "Normal";
-    if (d >= 0.0f)    return "atencao";
+// Determina a situação com base na temperatura atual, prevista e limite
+static const char *determinar_situacao(float temp_atual, float temp_prevista, int urgencia) {
+    float diferenca = urgencia - temp_prevista;
+    if (temp_atual > urgencia) return "Grave";
+    if (diferenca > 5.0f)      return "Normal";
+    if (diferenca >= 0.0f)     return "Atenção";
     return "Alerta";
 }
 
 /*============================================================================
- *  PREVISÃO - Regressão linear (já havia) + Holt
+ * PREVISÃO DE TEMPERATURA
+ * Funções para calcular previsões usando regressão linear e suavização Holt.
  *===========================================================================*/
-static bool regressao(float *x, float *y, int n, float *m, float *b){
-    if (n < 2) { *m = 0; *b = (n ? y[0] : 0); return false; }
-    float sx = 0, sy = 0, sxy = 0, sx2 = 0;
-    for (int i = 0; i < n; i++) { sx += x[i]; sy += y[i]; sxy += x[i] * y[i]; sx2 += x[i] * x[i]; }
-    float denom = n * sx2 - sx * sx;
-    if (fabsf(denom) < 1e-6) { *m = 0; *b = sy / n; return false; }
-    *m = (n * sxy - sx * sy) / denom; *b = (sy - *m * sx) / n; return true;
+
+// Calcula regressão linear simples para previsão
+static bool calcular_regressao(float *x, float *y, int n, float *m, float *b) {
+    if (n < 2) {
+        *m = 0;
+        *b = (n ? y[0] : 0);
+        return false;
+    }
+    float soma_x = 0, soma_y = 0, soma_xy = 0, soma_x2 = 0;
+    for (int i = 0; i < n; i++) {
+        soma_x += x[i];
+        soma_y += y[i];
+        soma_xy += x[i] * y[i];
+        soma_x2 += x[i] * x[i];
+    }
+    float denominador = n * soma_x2 - soma_x * soma_x;
+    if (fabsf(denominador) < 1e-6) {
+        *m = 0;
+        *b = soma_y / n;
+        return false;
+    }
+    *m = (n * soma_xy - soma_x * soma_y) / denominador;
+    *b = (soma_y - *m * soma_x) / n;
+    return true;
 }
 
-static float previsao_linear(float tempo_atual){
-    float m, b;
+// Calcula previsão linear com base no histórico
+static float prever_linear(float tempo_atual) {
+    float inclinacao, intercepcao;
     int n = previsao.historico_preenchido ? TAMANHO_HISTORICO_TEMP : previsao.indice_historico;
-    if (n >= 2 && regressao(previsao.historico_tempo, previsao.historico_temperatura, n, &m, &b)){
-        return m * (tempo_atual + INTERVALO_PREVISAO_SEGUNDOS) + b;
+    if (n >= 2 && calcular_regressao(previsao.historico_tempo, previsao.historico_temperatura, n, &inclinacao, &intercepcao)) {
+        return inclinacao * (tempo_atual + INTERVALO_PREVISAO_SEGUNDOS) + intercepcao;
     }
     return estado_sistema.temperatura_atual;
 }
 
 /*============================================================================
- *  BEEP
+ * CONTROLE DO BUZZER
+ * Função para emitir sons com o buzzer.
  *===========================================================================*/
-static void beep(int ms, int rep, int f){
-    uint32_t wrap = (1000000 / f) - 1;
+
+// Emite um beep com duração, repetições e frequência específicas
+static void emitir_beep(int duracao_ms, int repeticoes, int frequencia) {
+    uint32_t wrap = (1000000 / frequencia) - 1;
     pwm_set_wrap(slice_buzzer, wrap);
     pwm_set_chan_level(slice_buzzer, channel_buzzer, wrap / 2);
-    for (int i = 0; i <= rep; i++) {
+    for (int i = 0; i <= repeticoes; i++) {
         pwm_set_enabled(slice_buzzer, true);
-        vTaskDelay(pdMS_TO_TICKS(ms));
+        vTaskDelay(pdMS_TO_TICKS(duracao_ms));
         pwm_set_enabled(slice_buzzer, false);
-        if (i < rep) vTaskDelay(pdMS_TO_TICKS(100));
+        if (i < repeticoes) vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
 /*============================================================================
- *  INDICADORES VISUAIS (LEDs, Matriz, buzzer)
+ * INDICADORES VISUAIS
+ * Controla LEDs, matriz de LEDs e buzzer com base na situação.
  *===========================================================================*/
-static TickType_t ultimo_piscar = 0; static bool visivel = true;
-static void indicadores(const char *sit, bool conf){
-    if (!conf) { gpio_put(PINO_LED_VERDE, 0); gpio_put(PINO_LED_VERMELHO, 0);
-                 matriz_clear(); pwm_set_enabled(slice_buzzer, false); return; }
-    TickType_t now = xTaskGetTickCount();
-    if (now - ultimo_piscar > pdMS_TO_TICKS(PISCAR_INTERVALO_MS)) { visivel = !visivel; ultimo_piscar = now; }
-    if (!strcmp(sit, "Normal")) {
-        gpio_put(PINO_LED_VERDE, 1); gpio_put(PINO_LED_VERMELHO, 0);
-        matriz_draw_pattern(PAD_OK, COR_VERDE); pwm_set_enabled(slice_buzzer, false);
-    } else if (!strcmp(sit, "atencao")) {
-        gpio_put(PINO_LED_VERDE, 1); gpio_put(PINO_LED_VERMELHO, 1);
-        if (visivel) { matriz_draw_pattern(PAD_EXC, COR_AMARELO); beep(150, 0, 1500); } else matriz_clear();
-    } else if (!strcmp(sit, "Alerta")) {
-        gpio_put(PINO_LED_VERDE, 0); gpio_put(PINO_LED_VERMELHO, 1);
-        if (visivel) { matriz_draw_pattern(PAD_X, COR_VERMELHO); beep(100, 1, 2000); } else matriz_clear();
-    } else { /* Grave */
-        gpio_put(PINO_LED_VERDE, 0); gpio_put(PINO_LED_VERMELHO, visivel);
-        if (visivel) { matriz_draw_pattern(PAD_X, COR_VERMELHO); beep(80, 2, 2500); } else matriz_clear();
+static TickType_t ultimo_piscar = 0; // Última vez que os indicadores piscaram
+static bool visivel = true;          // Estado de visibilidade dos indicadores
+
+static void atualizar_indicadores(const char *situacao, bool configurado) {
+    if (!configurado) { // Desativa tudo se não configurado
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, 0);
+        matriz_clear();
+        pwm_set_enabled(slice_buzzer, false);
+        return;
+    }
+    TickType_t agora = xTaskGetTickCount();
+    if (agora - ultimo_piscar > pdMS_TO_TICKS(PISCAR_INTERVALO_MS)) {
+        visivel = !visivel;
+        ultimo_piscar = agora;
+    }
+    if (!strcmp(situacao, "Normal")) {
+        gpio_put(PINO_LED_VERDE, 1);
+        gpio_put(PINO_LED_VERMELHO, 0);
+        matriz_draw_pattern(PAD_OK, COR_VERDE);
+        pwm_set_enabled(slice_buzzer, false);
+    } else if (!strcmp(situacao, "Atenção")) {
+        gpio_put(PINO_LED_VERDE, 1);
+        gpio_put(PINO_LED_VERMELHO, 1);
+        if (visivel) {
+            matriz_draw_pattern(PAD_EXC, COR_AMARELO);
+            emitir_beep(150, 0, 1500);
+        } else {
+            matriz_clear();
+        }
+    } else if (!strcmp(situacao, "Alerta")) {
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, 1);
+        if (visivel) {
+            matriz_draw_pattern(PAD_X, COR_VERMELHO);
+            emitir_beep(100, 1, 2000);
+        } else {
+            matriz_clear();
+        }
+    } else { // "Grave"
+        gpio_put(PINO_LED_VERDE, 0);
+        gpio_put(PINO_LED_VERMELHO, visivel);
+        if (visivel) {
+            matriz_draw_pattern(PAD_X, COR_VERMELHO);
+            emitir_beep(80, 2, 2500);
+        } else {
+            matriz_clear();
+        }
     }
 }
 
 /*============================================================================
- *  DISPLAY OLED
+ * EXIBIÇÃO NO DISPLAY OLED
+ * Funções para desenhar as telas no display OLED.
  *===========================================================================*/
-static void tela_cfg(int urg){
+
+// Exibe a tela de configuração da temperatura de urgência
+static void exibir_tela_configuracao(int urgencia) {
     ssd1306_draw_string(&display, "Temperatura", 20, 0, false);
-    ssd1306_draw_string(&display, "Urgencia", 32, 16, false);
-    char txt[12]; snprintf(txt, sizeof(txt), "%d C", urg);
-    ssd1306_draw_string(&display, txt, (128 - strlen(txt) * 6) / 2, 40, false);
+    ssd1306_draw_string(&display, "Urgência", 32, 16, false);
+    char texto[12];
+    snprintf(texto, sizeof(texto), "%d C", urgencia);
+    ssd1306_draw_string(&display, texto, (128 - strlen(texto) * 6) / 2, 40, false);
 }
-static void tela_res(float t, float prev, float prevH, int urg, const char *sit){
-    char buf[30];
-    snprintf(buf, sizeof(buf), "Temp urg: %d C", urg);            ssd1306_draw_string(&display, buf, 0, 0, false);
-    snprintf(buf, sizeof(buf), "Atual: %.1fC", t);                ssd1306_draw_string(&display, buf, 0, 14, false);
-    snprintf(buf, sizeof(buf), "Prev lin: %.1fC", prev);          ssd1306_draw_string(&display, buf, 0, 28, false);
-    snprintf(buf, sizeof(buf), "Prev Holt: %.1fC", prevH);        ssd1306_draw_string(&display, buf, 0, 42, false);
-    snprintf(buf, sizeof(buf), "Situacao: %s", sit);              ssd1306_draw_string(&display, buf, 0, 56, false);
+
+// Exibe a tela com resultados e situação atual
+static void exibir_tela_resultados(float temp_atual, float temp_prevista, float temp_prevista_holt, int urgencia, const char *situacao) {
+    char buffer[30];
+    snprintf(buffer, sizeof(buffer), "Temp urg: %d C", urgencia);
+    ssd1306_draw_string(&display, buffer, 0, 0, false);
+    snprintf(buffer, sizeof(buffer), "Atual: %.1fC", temp_atual);
+    ssd1306_draw_string(&display, buffer, 0, 14, false);
+    snprintf(buffer, sizeof(buffer), "Prev lin: %.1fC", temp_prevista);
+    ssd1306_draw_string(&display, buffer, 0, 28, false);
+    snprintf(buffer, sizeof(buffer), "Prev Holt: %.1fC", temp_prevista_holt);
+    ssd1306_draw_string(&display, buffer, 0, 42, false);
+    snprintf(buffer, sizeof(buffer), "Situação: %s", situacao);
+    ssd1306_draw_string(&display, buffer, 0, 56, false);
 }
 
 /*============================================================================
- *  TASK: LEITURA TEMPERATURA, PREVISÕES
+ * TAREFA: LEITURA DE TEMPERATURA E PREVISÕES
+ * Lê a temperatura do sensor e calcula previsões.
  *===========================================================================*/
-static void tarefa_temp(void *p){
-    (void)p;
-    float nivel = 0, trend = 0; bool first = true, init_holt = false;
+static void tarefa_leitura_temperatura(void *param) {
+    (void)param;
+    float nivel = 0, tendencia = 0; // Variáveis para suavização Holt
+    bool primeira_leitura = true, holt_iniciado = false;
     const int passos_adiantados = INTERVALO_PREVISAO_SEGUNDOS / INTERVALO_LEITURA_SEGUNDOS;
     TickType_t inicio = xTaskGetTickCount();
     while (1) {
-        float t = ds18b20_get_temperature();
-        if (first) { nivel = t; trend = 0; first = false; }                /* filtro inicial */
-        /* filtro exponencial simples p/ atenuar ruído */
-        static float t_filt = 0; static bool ff = true;
-        t_filt = ff ? (ff = false, t) : t_filt * 0.8f + t * 0.2f;
+        float temp = ds18b20_get_temperature();
+        if (primeira_leitura) {
+            nivel = temp;
+            tendencia = 0;
+            primeira_leitura = false;
+        }
+        // Filtro exponencial para atenuar ruído
+        static float temp_filtrada = 0;
+        static bool primeiro_filtro = true;
+        temp_filtrada = primeiro_filtro ? (primeiro_filtro = false, temp) : temp_filtrada * 0.8f + temp * 0.2f;
 
-        if (t > -20 && t < 80) {
-            /* --- histórico regressão --- */
+        if (temp > -20 && temp < 80) { // Validação da temperatura
+            // Atualiza histórico para regressão
             float tempo = (xTaskGetTickCount() - inicio) * portTICK_PERIOD_MS / 1000.0f;
-            previsao.historico_temperatura[previsao.indice_historico] = t_filt;
+            previsao.historico_temperatura[previsao.indice_historico] = temp_filtrada;
             previsao.historico_tempo[previsao.indice_historico] = tempo;
             previsao.indice_historico = (previsao.indice_historico + 1) % TAMANHO_HISTORICO_TEMP;
-            if (!previsao.historico_preenchido && previsao.indice_historico == 0)
+            if (!previsao.historico_preenchido && previsao.indice_historico == 0) {
                 previsao.historico_preenchido = true;
+            }
 
-            /* --- Holt --- */
-            if (!init_holt) { nivel = t_filt; trend = 0; init_holt = true; }
-            float prev_nivel = nivel;
-            nivel = ALPHA_HOLT * t_filt + (1 - ALPHA_HOLT) * (nivel + trend);
-            trend = BETA_HOLT * (nivel - prev_nivel) + (1 - BETA_HOLT) * trend;
-            float holt_prev = nivel + trend * passos_adiantados;
+            // Suavização Holt
+            if (!holt_iniciado) {
+                nivel = temp_filtrada;
+                tendencia = 0;
+                holt_iniciado = true;
+            }
+            float nivel_anterior = nivel;
+            nivel = ALPHA_HOLT * temp_filtrada + (1 - ALPHA_HOLT) * (nivel + tendencia);
+            tendencia = BETA_HOLT * (nivel - nivel_anterior) + (1 - BETA_HOLT) * tendencia;
+            float previsao_holt = nivel + tendencia * passos_adiantados;
 
-            /* --- regressão linear --- */
-            float lin_prev = previsao_linear(tempo);
+            // Previsão linear
+            float previsao_linear_resultado = prever_linear(tempo);
 
-            /* envia às filas */
-            DadosTemperatura_t d = { .temperatura = t_filt, .marca_tempo = xTaskGetTickCount() };
-            xQueueSend(q_temp, &d, 0);
-            ResultadosPrevisao_t r = { .previsao_linear = lin_prev, .previsao_holt = holt_prev };
-            xQueueSend(q_prev, &r, 0);
+            // Envia dados para filas
+            DadosTemperatura_t dados = { .temperatura = temp_filtrada, .marca_tempo = xTaskGetTickCount() };
+            xQueueSend(q_temp, &dados, 0);
+            ResultadosPrevisao_t resultados = { .previsao_linear = previsao_linear_resultado, .previsao_holt = previsao_holt };
+            xQueueSend(q_prev, &resultados, 0);
 
-            /* estado global */
+            // Atualiza estado global
             if (xSemaphoreTake(mutex_estado, portMAX_DELAY)) {
-                estado_sistema.temperatura_atual = t_filt;
-                estado_sistema.temperatura_prevista = lin_prev;
-                estado_sistema.temperatura_prevista_holt = holt_prev;
+                estado_sistema.temperatura_atual = temp_filtrada;
+                estado_sistema.temperatura_prevista = previsao_linear_resultado;
+                estado_sistema.temperatura_prevista_holt = previsao_holt;
                 xSemaphoreGive(mutex_estado);
             }
         }
@@ -292,60 +387,119 @@ static void tarefa_temp(void *p){
 }
 
 /*============================================================================
- *  TASK: ENTRADA USUÁRIO  (mesma lógica original)
+ * TAREFA: ENTRADA DO USUÁRIO
+ * Processa entradas do joystick e botões.
  *===========================================================================*/
-static void tarefa_in(void *p){
-    (void)p; uint16_t adc_v; bool ba = false, bb = false; TickType_t ultJoy = 0; ComandoUsuario_t cmd;
+static void tarefa_entrada_usuario(void *param) {
+    (void)param;
+    uint16_t valor_adc;
+    bool botao_a_pressionado = false, botao_b_pressionado = false;
+    TickType_t ultimo_joystick = 0;
+    ComandoUsuario_t comando;
     while (1) {
-        adc_v = adc_read(); TickType_t now = xTaskGetTickCount(); EstadoSistema_t s; ler_estado(&s);
-        if (s.tela_atual == 0 && (now - ultJoy) > pdMS_TO_TICKS(DEBOUNCE_JOYSTICK_MS)) {
-            if (adc_v > 3000) { cmd.tipo = COMANDO_AJUSTAR_URGENCIA_SUBIR; cmd.valor = 1; xQueueSend(q_cmd, &cmd, 0); ultJoy = now; }
-            else if (adc_v < 1000) { cmd.tipo = COMANDO_AJUSTAR_URGENCIA_DESCER; cmd.valor = -1; xQueueSend(q_cmd, &cmd, 0); ultJoy = now; }
+        valor_adc = adc_read();
+        TickType_t agora = xTaskGetTickCount();
+        EstadoSistema_t estado;
+        ler_estado(&estado);
+        // Processa entrada do joystick na tela de configuração
+        if (estado.tela_atual == 0 && (agora - ultimo_joystick) > pdMS_TO_TICKS(DEBOUNCE_JOYSTICK_MS)) {
+            if (valor_adc > 3000) {
+                comando.tipo = COMANDO_AJUSTAR_URGENCIA_SUBIR;
+                comando.valor = 1;
+                xQueueSend(q_cmd, &comando, 0);
+                ultimo_joystick = agora;
+            } else if (valor_adc < 1000) {
+                comando.tipo = COMANDO_AJUSTAR_URGENCIA_DESCER;
+                comando.valor = -1;
+                xQueueSend(q_cmd, &comando, 0);
+                ultimo_joystick = agora;
+            }
         }
-        if (!gpio_get(PINO_BOTAO_A) && !ba) { ba = true; if (s.tela_atual == 0) { cmd.tipo = COMANDO_PROXIMA_TELA; xQueueSend(q_cmd, &cmd, 0); beep(100, 0, 2000); } }
-        else if (gpio_get(PINO_BOTAO_A)) ba = false;
-        if (!gpio_get(PINO_BOTAO_B) && !bb) { bb = true; if (s.tela_atual != 0) { cmd.tipo = COMANDO_TELA_ANTERIOR; xQueueSend(q_cmd, &cmd, 0); beep(100, 0, 2000); } }
-        else if (gpio_get(PINO_BOTAO_B)) bb = false;
+        // Processa botão A (próxima tela)
+        if (!gpio_get(PINO_BOTAO_A) && !botao_a_pressionado) {
+            botao_a_pressionado = true;
+            if (estado.tela_atual == 0) {
+                comando.tipo = COMANDO_PROXIMA_TELA;
+                xQueueSend(q_cmd, &comando, 0);
+                emitir_beep(100, 0, 2000);
+            }
+        } else if (gpio_get(PINO_BOTAO_A)) {
+            botao_a_pressionado = false;
+        }
+        // Processa botão B (tela anterior)
+        if (!gpio_get(PINO_BOTAO_B) && !botao_b_pressionado) {
+            botao_b_pressionado = true;
+            if (estado.tela_atual != 0) {
+                comando.tipo = COMANDO_TELA_ANTERIOR;
+                xQueueSend(q_cmd, &comando, 0);
+                emitir_beep(100, 0, 2000);
+            }
+        } else if (gpio_get(PINO_BOTAO_B)) {
+            botao_b_pressionado = false;
+        }
         vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_BOTAO_MS));
     }
 }
 
 /*============================================================================
- *  TASK: DISPLAY
+ * TAREFA: ATUALIZAÇÃO DO DISPLAY
+ * Gerencia o display OLED e indicadores visuais.
  *===========================================================================*/
-static void tarefa_disp(void *p){
-    (void)p; DadosTemperatura_t d; ResultadosPrevisao_t r; ComandoUsuario_t c;
+static void tarefa_atualizar_display(void *param) {
+    (void)param;
+    DadosTemperatura_t dados_temp;
+    ResultadosPrevisao_t resultados_prev;
+    ComandoUsuario_t comando;
     while (1) {
         xTaskNotifyWait(0, ULONG_MAX, NULL, pdMS_TO_TICKS(TIMEOUT_ATUALIZACAO_DISPLAY_MS));
-        if (xQueueReceive(q_temp, &d, 0) == pdTRUE) {
-            if (xSemaphoreTake(mutex_estado, portMAX_DELAY)) { estado_sistema.temperatura_atual = d.temperatura; xSemaphoreGive(mutex_estado); }
-        }
-        if (xQueueReceive(q_prev, &r, 0) == pdTRUE) {
+        // Recebe temperatura atual
+        if (xQueueReceive(q_temp, &dados_temp, 0) == pdTRUE) {
             if (xSemaphoreTake(mutex_estado, portMAX_DELAY)) {
-                estado_sistema.temperatura_prevista = r.previsao_linear;
-                estado_sistema.temperatura_prevista_holt = r.previsao_holt;
+                estado_sistema.temperatura_atual = dados_temp.temperatura;
                 xSemaphoreGive(mutex_estado);
             }
         }
-        if (xQueueReceive(q_cmd, &c, 0) == pdTRUE) {
+        // Recebe previsões
+        if (xQueueReceive(q_prev, &resultados_prev, 0) == pdTRUE) {
             if (xSemaphoreTake(mutex_estado, portMAX_DELAY)) {
-                switch (c.tipo) {
-                    case COMANDO_PROXIMA_TELA: estado_sistema.tela_atual = 1; estado_sistema.configuracao_concluida = true; break;
-                    case COMANDO_TELA_ANTERIOR: estado_sistema.tela_atual = 0; estado_sistema.configuracao_concluida = false; break;
+                estado_sistema.temperatura_prevista = resultados_prev.previsao_linear;
+                estado_sistema.temperatura_prevista_holt = resultados_prev.previsao_holt;
+                xSemaphoreGive(mutex_estado);
+            }
+        }
+        // Processa comandos do usuário
+        if (xQueueReceive(q_cmd, &comando, 0) == pdTRUE) {
+            if (xSemaphoreTake(mutex_estado, portMAX_DELAY)) {
+                switch (comando.tipo) {
+                    case COMANDO_PROXIMA_TELA:
+                        estado_sistema.tela_atual = 1;
+                        estado_sistema.configuracao_concluida = true;
+                        break;
+                    case COMANDO_TELA_ANTERIOR:
+                        estado_sistema.tela_atual = 0;
+                        estado_sistema.configuracao_concluida = false;
+                        break;
                     case COMANDO_AJUSTAR_URGENCIA_SUBIR:
-                    case COMANDO_AJUSTAR_URGENCIA_DESCER: estado_sistema.temperatura_urgencia += c.valor; break;
+                    case COMANDO_AJUSTAR_URGENCIA_DESCER:
+                        estado_sistema.temperatura_urgencia += comando.valor;
+                        break;
                 }
                 xSemaphoreGive(mutex_estado);
             }
         }
-        EstadoSistema_t s; ler_estado(&s);
-        const char *sit = situacao(s.temperatura_atual, s.temperatura_prevista, s.temperatura_urgencia);
-        indicadores(sit, s.configuracao_concluida);
+        // Atualiza display e indicadores
+        EstadoSistema_t estado;
+        ler_estado(&estado);
+        const char *situacao = determinar_situacao(estado.temperatura_atual, estado.temperatura_prevista, estado.temperatura_urgencia);
+        atualizar_indicadores(situacao, estado.configuracao_concluida);
         if (xSemaphoreTake(mutex_display, portMAX_DELAY)) {
             ssd1306_fill(&display, false);
-            if (s.tela_atual == 0) tela_cfg(s.temperatura_urgencia);
-            else                tela_res(s.temperatura_atual, s.temperatura_prevista,
-                                         s.temperatura_prevista_holt, s.temperatura_urgencia, sit);
+            if (estado.tela_atual == 0) {
+                exibir_tela_configuracao(estado.temperatura_urgencia);
+            } else {
+                exibir_tela_resultados(estado.temperatura_atual, estado.temperatura_prevista,
+                                       estado.temperatura_prevista_holt, estado.temperatura_urgencia, situacao);
+            }
             ssd1306_send_data(&display);
             xSemaphoreGive(mutex_display);
         }
@@ -353,137 +507,205 @@ static void tarefa_disp(void *p){
 }
 
 /*============================================================================
- *  TASK: PUBLICA MQTT
+ * TAREFA: PUBLICAÇÃO MQTT
+ * Publica dados no broker MQTT periodicamente.
  *===========================================================================*/
-static void pub_cb(void *a, err_t e) { if (e) printf("pub err %d\n", e); }
-static void tarefa_pub(void *p) {
-    (void)p;
+
+// Callback para erros de publicação
+static void callback_publicacao(void *arg, err_t erro) {
+    if (erro) printf("Erro de publicação MQTT: %d\n", erro);
+}
+
+static void tarefa_publicar_mqtt(void *param) {
+    (void)param;
     while (1) {
         if (mqtt_state.conectado && mqtt_client_is_connected(mqtt_state.inst)) {
-            EstadoSistema_t s;
-            ler_estado(&s); // Lê estado_sistema de forma segura
-            char buf[16];
+            EstadoSistema_t estado;
+            ler_estado(&estado);
+            char buffer[16];
 
             // Publica temperatura atual
-            snprintf(buf, sizeof(buf), "%.2f", s.temperatura_atual);
-            mqtt_publish(mqtt_state.inst, topic_full("/temperatura"), buf, strlen(buf),
-                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_cb, NULL);
+            snprintf(buffer, sizeof(buffer), "%.2f", estado.temperatura_atual);
+            mqtt_publish(mqtt_state.inst, topico_completo("/temperatura"), buffer, strlen(buffer),
+                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
 
-            // Publica previsão regressão linear
-            snprintf(buf, sizeof(buf), "%.2f", s.temperatura_prevista);
-            mqtt_publish(mqtt_state.inst, topic_full("/temperatura_previsao_regressao_linear"), buf, strlen(buf),
-                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_cb, NULL);
+            // Publica previsão por regressão linear
+            snprintf(buffer, sizeof(buffer), "%.2f", estado.temperatura_prevista);
+            mqtt_publish(mqtt_state.inst, topico_completo("/temperatura_previsao_regressao_linear"), buffer, strlen(buffer),
+                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
 
             // Publica previsão Holt
-            snprintf(buf, sizeof(buf), "%.2f", s.temperatura_prevista_holt);
-            mqtt_publish(mqtt_state.inst, topic_full("/temperatura_previsao_holt"), buf, strlen(buf),
-                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_cb, NULL);
+            snprintf(buffer, sizeof(buffer), "%.2f", estado.temperatura_prevista_holt);
+            mqtt_publish(mqtt_state.inst, topico_completo("/temperatura_previsao_holt"), buffer, strlen(buffer),
+                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
 
-            // Publica estado
-            const char *sit = situacao(s.temperatura_atual, s.temperatura_prevista, s.temperatura_urgencia);
-            mqtt_publish(mqtt_state.inst, topic_full("/estado"), sit, strlen(sit),
-                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_cb, NULL);
+            // Publica situação
+            const char *situacao = determinar_situacao(estado.temperatura_atual, estado.temperatura_prevista, estado.temperatura_urgencia);
+            mqtt_publish(mqtt_state.inst, topico_completo("/estado"), situacao, strlen(situacao),
+                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
 
             // Publica ponto de regulagem
-            snprintf(buf, sizeof(buf), "%d", s.temperatura_urgencia);
-            mqtt_publish(mqtt_state.inst, topic_full("/ponto_de_regulagem"), buf, strlen(buf),
-                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, pub_cb, NULL);
+            snprintf(buffer, sizeof(buffer), "%d", estado.temperatura_urgencia);
+            mqtt_publish(mqtt_state.inst, topico_completo("/ponto_de_regulagem"), buffer, strlen(buffer),
+                         MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
         }
         vTaskDelay(pdMS_TO_TICKS(TEMP_PUBLISH_INTERVAL_S * 1000));
     }
 }
 
 /*============================================================================
- *  MQTT CALLBACKS
+ * CALLBACKS MQTT
+ * Funções de callback para eventos MQTT.
  *===========================================================================*/
-static void in_data(void *arg, const u8_t *data, u16_t len, u8_t flg) {
-    MQTT_STATE_t *st = (MQTT_STATE_t*)arg;
-    strncpy(st->data, (const char*)data, MIN(len, sizeof(st->data) - 1)); st->data[len] = '\0';
-    if (strcmp(st->topic, topic_full("/led")) == 0) {
-        bool on = (!strcasecmp(st->data, "on") || !strcmp(st->data, "1"));
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
-    } else if (strcmp(st->topic, topic_full("/exit")) == 0) { mqtt_disconnect(st->inst); }
+
+// Processa dados recebidos
+static void processar_dados_recebidos(void *arg, const u8_t *dados, u16_t tamanho, u8_t flags) {
+    EstadoMQTT_t *estado = (EstadoMQTT_t*)arg;
+    strncpy(estado->data, (const char*)dados, MIN(tamanho, sizeof(estado->data) - 1));
+    estado->data[tamanho] = '\0';
+    if (strcmp(estado->topic, topico_completo("/led")) == 0) {
+        bool ligado = (!strcasecmp(estado->data, "on") || !strcmp(estado->data, "1"));
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, ligado);
+    } else if (strcmp(estado->topic, topico_completo("/exit")) == 0) {
+        mqtt_disconnect(estado->inst);
+    }
 }
-static void in_pub(void *arg, const char *topic, u32_t len) {
-    (void)len; MQTT_STATE_t *st = (MQTT_STATE_t*)arg; strncpy(st->topic, topic, sizeof(st->topic));
+
+// Registra tópico recebido
+static void registrar_topico(void *arg, const char *topico, u32_t tamanho) {
+    (void)tamanho;
+    EstadoMQTT_t *estado = (EstadoMQTT_t*)arg;
+    strncpy(estado->topic, topico, sizeof(estado->topic));
 }
-static void sub_cb(void *a, err_t e) { if (e) printf("sub err %d\n", e); }
-static void conn_cb(mqtt_client_t *c, void *arg, mqtt_connection_status_t stt) {
-    MQTT_STATE_t *st = (MQTT_STATE_t*)arg;
-    if (stt == MQTT_CONNECT_ACCEPTED) {
-        printf("MQTT ok\n"); st->conectado = true;
-        mqtt_sub_unsub(c, topic_full("/led"), MQTT_SUBSCRIBE_QOS, sub_cb, st, true);
-        mqtt_sub_unsub(c, topic_full("/print"), MQTT_SUBSCRIBE_QOS, sub_cb, st, true);
-        mqtt_sub_unsub(c, topic_full("/ping"), MQTT_SUBSCRIBE_QOS, sub_cb, st, true);
-        mqtt_sub_unsub(c, topic_full("/exit"), MQTT_SUBSCRIBE_QOS, sub_cb, st, true);
-        mqtt_publish(c, topic_full("/online"), "1", 1, MQTT_WILL_QOS, true, pub_cb, NULL);
-    } else { printf("MQTT off %d\n", stt); st->conectado = false; }
+
+// Callback para subscrição
+static void callback_subscricao(void *arg, err_t erro) {
+    if (erro) printf("Erro de subscrição MQTT: %d\n", erro);
+}
+
+// Callback para conexão
+static void callback_conexao(mqtt_client_t *cliente, void *arg, mqtt_connection_status_t status) {
+    EstadoMQTT_t *estado = (EstadoMQTT_t*)arg;
+    if (status == MQTT_CONNECT_ACCEPTED) {
+        printf("Conexão MQTT estabelecida\n");
+        estado->conectado = true;
+        mqtt_sub_unsub(cliente, topico_completo("/led"), MQTT_SUBSCRIBE_QOS, callback_subscricao, estado, true);
+        mqtt_sub_unsub(cliente, topico_completo("/print"), MQTT_SUBSCRIBE_QOS, callback_subscricao, estado, true);
+        mqtt_sub_unsub(cliente, topico_completo("/ping"), MQTT_SUBSCRIBE_QOS, callback_subscricao, estado, true);
+        mqtt_sub_unsub(cliente, topico_completo("/exit"), MQTT_SUBSCRIBE_QOS, callback_subscricao, estado, true);
+        mqtt_publish(cliente, topico_completo("/online"), "1", 1, MQTT_WILL_QOS, true, callback_publicacao, NULL);
+    } else {
+        printf("Conexão MQTT perdida: %d\n", status);
+        estado->conectado = false;
+    }
 }
 
 /*============================================================================
- *  TASK: WI-FI + MQTT
+ * TAREFA: CONEXÃO WI-FI E MQTT
+ * Estabelece conexão Wi-Fi e MQTT.
  *===========================================================================*/
-static void tarefa_wifi(void *p) {
-    (void)p;
-    if (cyw43_arch_init()) { printf("CYW43 err\n"); vTaskDelete(NULL); }
+static void tarefa_conectar_wifi_mqtt(void *param) {
+    (void)param;
+    if (cyw43_arch_init()) {
+        printf("Erro ao inicializar CYW43\n");
+        vTaskDelete(NULL);
+    }
     cyw43_arch_enable_sta_mode();
-    printf("Wi-Fi %s...\n", WIFI_SSID);
+    printf("Conectando ao Wi-Fi %s...\n", WIFI_SSID);
     if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 30000)) {
-        printf("Wi-Fi falha\n"); vTaskDelete(NULL);
+        printf("Falha na conexão Wi-Fi\n");
+        vTaskDelete(NULL);
     }
-    printf("IP %s\n", ipaddr_ntoa(&(netif_list->ip_addr)));
-    mqtt_state.inst = mqtt_client_new(); if (!mqtt_state.inst) { vTaskDelete(NULL); }
-    static char cid[12]; pico_get_unique_board_id_string(cid, sizeof(cid));
-    for (int i = 0; i < strlen(cid); i++) cid[i] = tolower(cid[i]);
-    mqtt_state.info.client_id = cid; mqtt_state.info.keep_alive = MQTT_KEEP_ALIVE_S;
-    mqtt_state.info.client_user = MQTT_USERNAME; mqtt_state.info.client_pass = MQTT_PASSWORD;
-    mqtt_state.info.will_topic = topic_full("/online"); mqtt_state.info.will_msg = MQTT_WILL_MSG;
-    mqtt_state.info.will_qos = MQTT_WILL_QOS; mqtt_state.info.will_retain = true;
+    printf("IP atribuído: %s\n", ipaddr_ntoa(&(netif_list->ip_addr)));
+    mqtt_state.inst = mqtt_client_new();
+    if (!mqtt_state.inst) {
+        vTaskDelete(NULL);
+    }
+    static char id_cliente[12];
+    pico_get_unique_board_id_string(id_cliente, sizeof(id_cliente));
+    for (int i = 0; i < strlen(id_cliente); i++) {
+        id_cliente[i] = tolower(id_cliente[i]);
+    }
+    mqtt_state.info.client_id = id_cliente;
+    mqtt_state.info.keep_alive = MQTT_KEEP_ALIVE_S;
+    mqtt_state.info.client_user = MQTT_USERNAME;
+    mqtt_state.info.client_pass = MQTT_PASSWORD;
+    mqtt_state.info.will_topic = topico_completo("/online");
+    mqtt_state.info.will_msg = MQTT_WILL_MSG;
+    mqtt_state.info.will_qos = MQTT_WILL_QOS;
+    mqtt_state.info.will_retain = true;
     if (dns_gethostbyname(MQTT_SERVER, &mqtt_state.server_addr, NULL, NULL) != ERR_OK) {
-        while (dns_gethostbyname(MQTT_SERVER, &mqtt_state.server_addr, NULL, NULL) == ERR_INPROGRESS) vTaskDelay(pdMS_TO_TICKS(500));
+        while (dns_gethostbyname(MQTT_SERVER, &mqtt_state.server_addr, NULL, NULL) == ERR_INPROGRESS) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
     }
-    printf("Broker %s\n", ipaddr_ntoa(&mqtt_state.server_addr));
-    mqtt_set_inpub_callback(mqtt_state.inst, in_pub, in_data, &mqtt_state);
-    if (mqtt_client_connect(mqtt_state.inst, &mqtt_state.server_addr, MQTT_PORT, conn_cb, &mqtt_state, &mqtt_state.info) != ERR_OK) {
-        printf("MQTT connect err\n"); vTaskDelete(NULL);
+    printf("Broker MQTT: %s\n", ipaddr_ntoa(&mqtt_state.server_addr));
+    mqtt_set_inpub_callback(mqtt_state.inst, registrar_topico, processar_dados_recebidos, &mqtt_state);
+    if (mqtt_client_connect(mqtt_state.inst, &mqtt_state.server_addr, MQTT_PORT, callback_conexao, &mqtt_state, &mqtt_state.info) != ERR_OK) {
+        printf("Erro ao conectar ao MQTT\n");
+        vTaskDelete(NULL);
     }
-    while (1) { cyw43_arch_poll(); vTaskDelay(pdMS_TO_TICKS(10)); }
+    while (1) {
+        cyw43_arch_poll();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 /*============================================================================
- *  MAIN
+ * FUNÇÃO PRINCIPAL
+ * Inicializa o sistema e cria as tarefas.
  *===========================================================================*/
 int main(void) {
     stdio_init_all();
-    /* I2C Display */
+
+    // Inicialização do I2C para o display
     i2c_init(i2c1, 400 * 1000);
     gpio_set_function(PINO_SDA_I2C, GPIO_FUNC_I2C);
     gpio_set_function(PINO_SCL_I2C, GPIO_FUNC_I2C);
-    gpio_pull_up(PINO_SDA_I2C); gpio_pull_up(PINO_SCL_I2C);
-    ssd1306_init(&display, 128, 64, false, 0x3C, i2c1); ssd1306_config(&display);
-    /* ADC / botões / LEDs / buzzer */
-    adc_init(); adc_gpio_init(PINO_ADC); adc_select_input(0);
-    gpio_init(PINO_BOTAO_A); gpio_set_dir(PINO_BOTAO_A, GPIO_IN); gpio_pull_up(PINO_BOTAO_A);
-    gpio_init(PINO_BOTAO_B); gpio_set_dir(PINO_BOTAO_B, GPIO_IN); gpio_pull_up(PINO_BOTAO_B);
-    gpio_init(PINO_LED_VERDE); gpio_set_dir(PINO_LED_VERDE, GPIO_OUT);
-    gpio_init(PINO_LED_VERMELHO); gpio_set_dir(PINO_LED_VERMELHO, GPIO_OUT);
-    gpio_set_function(PINO_BUZZER, GPIO_FUNC_PWM);
-    slice_buzzer = pwm_gpio_to_slice_num(PINO_BUZZER); channel_buzzer = pwm_gpio_to_channel(PINO_BUZZER);
-    pwm_set_clkdiv(slice_buzzer, 125.0f); pwm_set_wrap(slice_buzzer, (1000000 / 2000) - 1);
-    pwm_set_chan_level(slice_buzzer, channel_buzzer, (1000000 / 2000) / 2); pwm_set_enabled(slice_buzzer, false);
-    ds18b20_init(PINO_DS18B20); inicializar_matriz_led();
+    gpio_pull_up(PINO_SDA_I2C);
+    gpio_pull_up(PINO_SCL_I2C);
+    ssd1306_init(&display, 128, 64, false, 0x3C, i2c1);
+    ssd1306_config(&display);
 
-    /* RTOS infra */
-    mutex_estado = xSemaphoreCreateMutex(); mutex_display = xSemaphoreCreateMutex();
+    // Inicialização do ADC, botões, LEDs e buzzer
+    adc_init();
+    adc_gpio_init(PINO_ADC);
+    adc_select_input(0);
+    gpio_init(PINO_BOTAO_A);
+    gpio_set_dir(PINO_BOTAO_A, GPIO_IN);
+    gpio_pull_up(PINO_BOTAO_A);
+    gpio_init(PINO_BOTAO_B);
+    gpio_set_dir(PINO_BOTAO_B, GPIO_IN);
+    gpio_pull_up(PINO_BOTAO_B);
+    gpio_init(PINO_LED_VERDE);
+    gpio_set_dir(PINO_LED_VERDE, GPIO_OUT);
+    gpio_init(PINO_LED_VERMELHO);
+    gpio_set_dir(PINO_LED_VERMELHO, GPIO_OUT);
+    gpio_set_function(PINO_BUZZER, GPIO_FUNC_PWM);
+    slice_buzzer = pwm_gpio_to_slice_num(PINO_BUZZER);
+    channel_buzzer = pwm_gpio_to_channel(PINO_BUZZER);
+    pwm_set_clkdiv(slice_buzzer, 125.0f);
+    pwm_set_wrap(slice_buzzer, (1000000 / 2000) - 1);
+    pwm_set_chan_level(slice_buzzer, channel_buzzer, (1000000 / 2000) / 2);
+    pwm_set_enabled(slice_buzzer, false);
+
+    // Inicialização do sensor e matriz de LEDs
+    ds18b20_init(PINO_DS18B20);
+    inicializar_matriz_led();
+
+    // Infraestrutura do RTOS
+    mutex_estado = xSemaphoreCreateMutex();
+    mutex_display = xSemaphoreCreateMutex();
     q_temp = xQueueCreate(10, sizeof(DadosTemperatura_t));
     q_prev = xQueueCreate(10, sizeof(ResultadosPrevisao_t));
     q_cmd = xQueueCreate(10, sizeof(ComandoUsuario_t));
 
-    xTaskCreate(tarefa_temp, "Temp", 1024, NULL, 2, NULL);
-    xTaskCreate(tarefa_in, "Entrada", 512, NULL, 1, NULL);
-    xTaskCreate(tarefa_disp, "Display", 1024, NULL, 1, NULL);
-    xTaskCreate(tarefa_wifi, "WiFi", 2048, NULL, 3, NULL);
-    xTaskCreate(tarefa_pub, "MQTTPub", 768, NULL, 1, NULL);
+    // Criação das tarefas
+    xTaskCreate(tarefa_leitura_temperatura, "Temperatura", 1024, NULL, 2, NULL);
+    xTaskCreate(tarefa_entrada_usuario, "Entrada", 512, NULL, 1, NULL);
+    xTaskCreate(tarefa_atualizar_display, "Display", 1024, NULL, 1, NULL);
+    xTaskCreate(tarefa_conectar_wifi_mqtt, "WiFi_MQTT", 2048, NULL, 3, NULL);
+    xTaskCreate(tarefa_publicar_mqtt, "Publicacao_MQTT", 768, NULL, 1, NULL);
 
     vTaskStartScheduler();
     while (1) tight_loop_contents();
