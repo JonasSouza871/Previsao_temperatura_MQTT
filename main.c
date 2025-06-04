@@ -171,7 +171,7 @@ static void ler_estado(EstadoSistema_t *destino) {
     }
 }
 
-// Determina a situação com base na temperatura atual, prevista e limite
+// Determina a situacao com base na temperatura atual, prevista e limite
 static const char *determinar_situacao(float temp_atual, float temp_prevista, int urgencia) {
     float diferenca = urgencia - temp_prevista;
     if (temp_atual > urgencia) return "Grave";
@@ -240,7 +240,7 @@ static void emitir_beep(int duracao_ms, int repeticoes, int frequencia) {
 
 /*============================================================================
  * INDICADORES VISUAIS
- * Controla LEDs, matriz de LEDs e buzzer com base na situação.
+ * Controla LEDs, matriz de LEDs e buzzer com base na situacao.
  *===========================================================================*/
 static TickType_t ultimo_piscar = 0; // Última vez que os indicadores piscaram
 static bool visivel = true;          // Estado de visibilidade dos indicadores
@@ -307,7 +307,7 @@ static void exibir_tela_configuracao(int urgencia) {
     ssd1306_draw_string(&display, texto, (128 - strlen(texto) * 6) / 2, 40, false);
 }
 
-// Exibe a tela com resultados e situação atual
+// Exibe a tela com resultados e situacao atual
 static void exibir_tela_resultados(float temp_atual, float temp_prevista, float temp_prevista_holt, int urgencia, const char *situacao) {
     char buffer[30];
     snprintf(buffer, sizeof(buffer), "Temp urg: %d C", urgencia);
@@ -539,7 +539,7 @@ static void tarefa_publicar_mqtt(void *param) {
             mqtt_publish(mqtt_state.inst, topico_completo("/temperatura_previsao_holt"), buffer, strlen(buffer),
                          MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
 
-            // Publica situação
+            // Publica situacao
             const char *situacao = determinar_situacao(estado.temperatura_atual, estado.temperatura_prevista, estado.temperatura_urgencia);
             mqtt_publish(mqtt_state.inst, topico_completo("/estado"), situacao, strlen(situacao),
                          MQTT_PUBLISH_QOS, MQTT_PUBLISH_RETAIN, callback_publicacao, NULL);
