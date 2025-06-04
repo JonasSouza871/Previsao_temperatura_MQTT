@@ -318,7 +318,7 @@ static void exibir_tela_resultados(float temp_atual, float temp_prevista, float 
     ssd1306_draw_string(&display, buffer, 0, 28, false);
     snprintf(buffer, sizeof(buffer), "Prev Holt: %.1fC", temp_prevista_holt);
     ssd1306_draw_string(&display, buffer, 0, 42, false);
-    snprintf(buffer, sizeof(buffer), "Situação: %s", situacao);
+    snprintf(buffer, sizeof(buffer), "Situcao: %s", situacao);
     ssd1306_draw_string(&display, buffer, 0, 56, false);
 }
 
