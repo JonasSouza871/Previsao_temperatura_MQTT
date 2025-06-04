@@ -1,41 +1,23 @@
-/******************************************************************************
- *  SISTEMA SASI – Monitor de Temperatura + Previsão (Regressão & Holt) + MQTT
- *  Revisão: 05/06/2025
- *
- *  Publica:
- *      /Temperatura_MQTT _Pico/temperature                (atual)
- *      /Temperatura_MQTT _Pico/temperature_predicted      (regressão linear)
- *      /Temperatura_MQTT _Pico/temperature_predicted_holt (Holt)
- *      /Temperatura_MQTT _Pico/status                     (Normal/Alerta…)
- *
- *  Demais recursos: display OLED, LEDs, matriz 8×8, buzzer, FreeRTOS, Wi-Fi
- ******************************************************************************/
-
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
 #include <limits.h>
-
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "pico/unique_id.h"
 #include "pico/cyw43_arch.h"
-
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
 #include "hardware/pwm.h"
-
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
 #include "semphr.h"
-
 #include "lwip/apps/mqtt.h"
 #include "lwip/dns.h"
 #include "lwip/altcp_tls.h"
-
 #include "ssd1306.h"
 #include "ds18b20.h"
 #include "matriz_led.h"
