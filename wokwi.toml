@@ -1,0 +1,4 @@
+[wokwi]
+version = 1
+firmware = 'PicoMQTT.uf2'
+elf = 'PicoMQTT.elf'
