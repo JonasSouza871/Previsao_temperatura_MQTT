@@ -1,22 +1,3 @@
-# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
-# Esta seção é utilizada pela extensão do VS Code para o Raspberry Pi Pico
-# e garante a correta configuração do ambiente de desenvolvimento.
-if(WIN32)
-    set(USERHOME $ENV{USERPROFILE})
-else()
-    set(USERHOME $ENV{HOME})
-endif()
-# As versões do SDK, toolchain e picotool podem precisar ser ajustadas
-# de acordo com a configuração do ambiente de desenvolvimento.
-set(sdkVersion 2.1.0)
-set(toolchainVersion 13_3_Rel1)
-set(picotoolVersion 2.1.0)
-
-set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
-if (EXISTS ${picoVscode})
-    include(${picoVscode})
-endif()
-# ====================================================================================
 
 cmake_minimum_required(VERSION 3.13)
 

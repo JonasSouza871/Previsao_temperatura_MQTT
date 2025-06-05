@@ -31,7 +31,6 @@
 #define MQTT_SERVER     ""   // IP do broker ou hostname
 #define MQTT_USERNAME   ""         // Deixe "" se broker anônimo
 #define MQTT_PASSWORD   ""           // Deixe "" se broker anônimo
-
 /*============================================================================
  * DEFINIÇÕES DE HARDWARE
  * Pinos usados no projeto.
